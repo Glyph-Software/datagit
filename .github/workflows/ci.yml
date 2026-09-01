@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go build ./...
+      - run: make lint
+      - name: Unit tests (race detector on)
+        run: go test -race ./internal/...
+
+  property:
+    # PLAN.md W1: the differential harness is the primary correctness evidence,
+    # so it gates every change rather than running on a schedule.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Regressions (seed corpus and minimized repros)
+        run: make test-regressions
+      - name: Differential harness
+        run: make test-property SEQUENCES=20000 OPS=60
+
+  frozen:
+    # The canonical encoding and commit hash are frozen as datagit.commit.v1
+    # (PLAN.md M0.4, W3). A failure here means the change would invalidate every
+    # commit id ever written, so it is called out separately from other tests.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go test ./internal/hash/ -run 'TestGolden|TestNumericNormalization|TestLengthPrefixing|TestMerkle' -v

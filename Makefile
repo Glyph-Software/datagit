@@ -44,6 +44,15 @@ check-model-imports: ## Enforce: internal/model is never imported by non-test co
 test: ## Unit tests, race detector on
 	go test -race ./internal/...
 
+.PHONY: test-frozen
+test-frozen: ## Verify the frozen canonical encoding and commit hash (M0.4, W3)
+	go test ./internal/hash/ -v
+
+.PHONY: proto
+proto: ## Generate Go from the protobuf definitions
+	buf lint
+	buf generate
+
 # --- the primary correctness evidence (PLAN.md W1) ---------------------------
 
 .PHONY: test-property
