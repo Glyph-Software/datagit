@@ -1,0 +1,19 @@
+# Seeds that once found a real divergence between the reference model and the
+# engine. Each is replayed by TestSeedCorpus forever. PLAN.md: failures are
+# minimized and added to the corpus permanently.
+#
+# 4     F1  descendant branch inherited a moving fork point (chain not captured)
+# 5     F3  session view tracked the branch head instead of its base commit
+# 8     F3  same, via a commit landing on the session's branch
+# 26    F3  session view moved when its branch absorbed its parent
+# 35    F3  minimal case: open session, commit to parent, update-from-parent
+# 97    F3  same shape with a deeper branch
+# 2619  F4  fork-point advance changed effective state with no overlay write,
+#           so "changes since base" missed the columns the parent contributed
+4
+5
+8
+26
+35
+97
+2619

@@ -33,6 +33,32 @@ Milestones map to DESIGN.md §20.2 versions. Section references like §7.3 point
 
 ## Phase 0 — De-risking spikes
 
+> **Status: complete for the M1 gate.** S1, S2, S3, and S5 have run. No kill
+> criterion was triggered, so M1 is clear to start. Eleven findings changed the
+> design; five were correctness bugs the differential harness caught before any
+> production code existed. Two DESIGN.md figures were wrong and are corrected.
+> Full results and verdicts: [docs/phase0/findings.md](docs/phase0/findings.md).
+>
+> | Spike | Verdict |
+> |---|---|
+> | S1 point read | pass — 2.09 ms p95 at depth 3, depth 8 within 2.4× of depth 1 |
+> | S1 filtered read | pass with amendments (findings F7, F9) |
+> | S1 correctness | pass — both §7.3 hazards reproduced at 51.4M versions |
+> | S2 | pass — 10.2M operations, zero divergence, after fixing F1–F5 |
+> | S3 latency | pass — 1.70 ms added p99 |
+> | S3 amplification | **fail — 8.7–9.4× against a ≤3× bar** (F11) |
+> | S5 storage | pass — 3.33× at rest |
+> | S5 pruning | pass — 33.7× faster than `DELETE` |
+>
+> The amplification miss does not block M1. The stated fallback was batching,
+> which was already in place and is not the lever — the ratio is flat across
+> change-set sizes because the cost is per-row index maintenance. The real levers
+> (dropping the `commit_id` index, a lighter index set for the `audit` tier) are
+> M4 performance work. The corrected figure is now published in DESIGN.md §14.2
+> and README.md rather than left for an adopter to discover.
+>
+> S4 remains unrun by design: it gates M6, not M1.
+
 **Purpose:** falsify the design's load-bearing assumptions before building on them. Phase 0 code is throwaway **except S2**, which becomes the permanent test harness.
 
 Each spike has a pass criterion, a kill criterion, and a stated design fallback. A failed spike changes the design, which is cheaper now than in M3.
@@ -101,10 +127,22 @@ S1–S3 and S5 gate M1. **S4 gates M6 (schema), not M1** — MySQL DDL is not on
 
 ### Phase 0 exit criteria
 
-- S1, S3, S5 pass, or their fallbacks are adopted into DESIGN.md **before M1 starts**.
-- S2's reference model and property harness are merged and running in CI.
-- DESIGN.md §14.1 targets are replaced with measured PostgreSQL numbers, relabelled as measured.
-- S4 is scheduled before M6 and its result recorded before M6 starts.
+- [x] S1, S3, S5 pass, or their fallbacks are adopted into DESIGN.md **before M1 starts**. S3's amplification bar failed; the corrected figure and its levers are recorded in DESIGN.md §14.2 and finding F11.
+- [x] S2's reference model and property harness are merged. **Still to do:** wire `make test-property` into CI once CI exists (M0.1).
+- [x] DESIGN.md §14.1 targets replaced with measured PostgreSQL numbers, relabelled as measured.
+- [ ] S4 scheduled before M6 and its result recorded before M6 starts.
+
+### Carried into M1 from Phase 0
+
+Findings that change specific work units, beyond the DESIGN.md amendments:
+
+| Finding | Affects |
+|---|---|
+| F1 — chains captured, not derived | M1.1 control schema: `datagit_ref.chain` and `datagit_commit.chain` exist from the first migration |
+| F8 — no surrogate sidecar key | M1.2 sidecar DDL: primary key is `(branch_id, pk…, seq_from)` |
+| F9 — index shape | M1.2 and M2.6: per-column indexes end with the primary key |
+| F10 — ref-lock ceiling | M1.4: the `audit` tier must not take the ref lock; M4.6 measures both tiers |
+| F11 — amplification | M4.6: drop the `commit_id` index and measure the `audit` tier's lighter index set |
 
 ---
 

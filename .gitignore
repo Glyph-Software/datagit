@@ -1,0 +1,17 @@
+# Go build output
+/datagit
+/datagitd
+/s1_resolution
+/s3_commit
+/s5_storage
+*.test
+*.out
+
+# Local env
+.env
+*.local
+
+# Editor
+.DS_Store
+.idea/
+.vscode/

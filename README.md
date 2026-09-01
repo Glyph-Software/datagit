@@ -150,10 +150,12 @@ Commits are hash-chained, so history is tamper-evident — with an honest limit,
 ## Trade-offs, stated plainly
 
 - **Adoption is a write-path rewrite.** See above. There is no drop-in mode.
-- **Storage.** A `versioned` table costs roughly 3–4× its size at rest once the sidecar and its indexes are counted, plus history proportional to churn. Retention policies and garbage collection bound the growth.
-- **Write latency.** Commits go through a network hop and do more work in the transaction. The target is < 5 ms added at p99 for small commits.
+- **Storage.** A `versioned` table costs 3.3× its size at rest once the sidecar and its indexes are counted, plus history proportional to churn. Retention policies and garbage collection bound the growth.
+- **Write amplification is about 9×**, measured in write-ahead-log bytes. Most of it is index maintenance on the sidecar, not the extra rows themselves. This is the number most likely to surprise you when sizing a deployment.
+- **Write latency.** Commits go through a network hop and do more work in the transaction. Measured at 1.7 ms added at p99 for a single-row commit.
+- **Commit throughput per branch is capped.** Commits to one branch are serialized so their sequence numbers are ordered, which measures at roughly 850 commits per second regardless of how many application instances write. Batch your writes: one commit carrying a thousand rows reaches about 20,000 rows per second. High-volume `audit` tables bypass the serialization entirely.
 - **Discipline.** The guarantee "the live table is `main@HEAD`" holds only while writes go through DataGit. Optional trigger guards can reject or capture out-of-band writes, but nothing makes them free, and the guard stops accidents, not adversaries.
-- **Branch access is not free SQL.** Structured API, or materialize the branch.
+- **Branch access is not free SQL.** Structured API, or materialize the branch. Filtered branch reads must be paginated and need an index on the column you filter by — without one they degrade to a full scan of the version history.
 - **Very large merges are not atomic.** Above a configurable size, a merge must opt into chunked apply, during which direct readers can see a partial state. The ref is flagged for the duration.
 - **Primary keys are row identity.** Changing a primary key reads as a delete plus an insert, and history does not follow it across. Tables without a stable primary key cannot be `versioned`.
 

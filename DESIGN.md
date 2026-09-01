@@ -138,8 +138,9 @@ The commit graph is a DAG. `seq` is *not* a global ordering across branches and 
 | Revert a commit | ✅ | ✅ |
 | Branch, diff, merge | ❌ | ✅ |
 | Requires stable PK | preferred | **required** |
-| Storage at rest (data + sidecar indexes, before history) | ~1.5× | ~3–4× |
-| Added p99 write latency (target) | < 2 ms | < 5 ms |
+| Storage at rest (data + sidecar indexes, before history) | ~1.5× measured | 3.33× measured |
+| Commits/s to one branch | not serialized — orders by sequence | ~850 measured, independent of writer count |
+| Added p99 write latency, single-row commit | < 2 ms (target) | 1.70 ms measured |
 
 `audit` is the tier for high-volume tables where you want the record but will never branch. `versioned` is the tier for data humans curate.
 
@@ -254,7 +255,12 @@ One typed sidecar per tracked table, generated from that table's schema and evol
 ```sql
 -- Generated for a tracked table `products` with primary key (sku).
 CREATE TABLE datagit_v_products (
-    version_id    bigserial    PRIMARY KEY,
+    -- Natural key, not a surrogate. Phase 0 finding F8: PostgreSQL requires
+    -- every unique constraint on a partitioned table to contain the partition
+    -- key, and §14.3 partitions this table by (branch_id, seq_from). A bare
+    -- `version_id bigserial PRIMARY KEY` and partitioning cannot both hold.
+    -- Nothing in the design refers to a surrogate version id, and this tuple is
+    -- unique anyway, so the surrogate is dropped.
     branch_id     uuid         NOT NULL,
     seq_from      bigint       NOT NULL,
     seq_to        bigint       NOT NULL DEFAULT 9223372036854775807,  -- open interval
@@ -274,7 +280,9 @@ CREATE TABLE datagit_v_products (
     name          text,
     category      text,
     price         numeric(12,2),
-    updated_at    timestamptz
+    updated_at    timestamptz,
+
+    PRIMARY KEY (branch_id, sku, seq_from)
 );
 
 CREATE INDEX v_products_resolve  ON datagit_v_products (branch_id, sku, seq_from DESC);
@@ -333,6 +341,17 @@ CREATE TABLE datagit_commit (
     change_digest bytea  NOT NULL,      -- Merkle root over the change set, §12.1
     schema_epoch  bigint NOT NULL,      -- pointer into schema history
     integrity     text   NOT NULL DEFAULT 'intact',  -- intact | purged, §13.4
+
+    -- The resolution chain in force when this commit was made: an ordered list
+    -- of (branch_id, seq) segments, at most 8 (§18).
+    --
+    -- Phase 0 finding F1. This MUST be stored, not re-derived by walking
+    -- parent refs at read time. UpdateFromParent (§9.6) advances a branch's fork
+    -- point, so a chain rebuilt later reads ancestors at whatever position they
+    -- have since reached — and historical reads would return states that were
+    -- never true.
+    chain         jsonb  NOT NULL,
+
     UNIQUE (repo_id, branch_id, seq)
 );
 
@@ -344,6 +363,14 @@ CREATE TABLE datagit_ref (
     head_commit   bytea,                        -- NULL only for an empty new branch
     parent_ref    uuid REFERENCES datagit_ref(id),
     fork_commit   bytea,                        -- the commit on parent_ref this diverged from
+
+    -- The inherited tail of this branch's resolution chain, captured at fork.
+    -- Phase 0 finding F1: a descendant must NOT re-derive this from its
+    -- ancestors' live fork points, or absorbing a parent silently changes what
+    -- unrelated child branches resolve to. UpdateFromParent rewrites only the
+    -- updated branch's own tail.
+    chain         jsonb NOT NULL DEFAULT '[]'::jsonb,
+
     protected     boolean NOT NULL DEFAULT false,
     min_approvals smallint NOT NULL DEFAULT 0,
     created_by    text NOT NULL,
@@ -356,6 +383,8 @@ CREATE TABLE datagit_session (
     repo_id       uuid NOT NULL REFERENCES datagit_repo(id),
     branch_id     uuid NOT NULL REFERENCES datagit_ref(id),   -- never the default branch, §6.1
     principal     text NOT NULL,
+    -- Reads inside the session resolve against THIS commit's chain, not the
+    -- branch's live head. Phase 0 finding F3, §6.2.
     base_commit   bytea NOT NULL,
     state         text NOT NULL,        -- open | committing | committed | abandoned | expired
     lease_until   timestamptz NOT NULL, -- renewed on activity; reaped by GC once passed
@@ -440,8 +469,10 @@ Never touches the live table. Two shapes:
 
 **Session** — for work that accumulates over hours or days before it is worth a commit: a curator editing through a UI, an import that validates as it goes, a script that wants to inspect intermediate state.
 
-1. `OpenSession(branch)` records a `datagit_session` row with a lease (default 24 h, renewed on every write, capped at a configurable maximum).
-2. Writes resolve the row's current state *within the session* — the session's own staged rows take priority over the branch ([§7.3](#73-an-arbitrary-branch-at-an-arbitrary-commit)) — then insert a staged version tagged with `session_id` and the zero commit hash.
+1. `OpenSession(branch)` records a `datagit_session` row with a lease (default 24 h, renewed on every write, capped at a configurable maximum) and a base commit.
+2. Reads and writes inside the session resolve against **the chain recorded on that base commit**, with the session's own staged rows layered on top at priority −1 ([§7.3](#73-an-arbitrary-branch-at-an-arbitrary-commit)). Writes then insert a staged version tagged with `session_id` and the zero commit hash.
+
+   Phase 0 finding F3: pinning to the base commit's chain, rather than following the branch's live head, is what keeps the view stable. Otherwise a commit landing on the branch — or the branch absorbing its parent — would change what the person editing in the session sees, mid-edit. Since step 5 refuses to commit a session whose branch has moved, following the head would only ever show a view that cannot be committed.
 3. Staged rows are visible only to reads that name the session. Other readers of the branch never see them.
 4. `CommitSession` stamps the staged rows with the commit hash, clears `session_id`, appends the commit, and advances the ref — one transaction under the ref lock, cost proportional to the change.
 5. `AbandonSession`, or lease expiry, marks the session `abandoned` or `expired`; GC deletes its staged rows. Nothing was ever visible outside the session, so nothing needs undoing.
@@ -506,17 +537,15 @@ Index `(branch_id, seq_from, seq_to)` serves it. Cost is proportional to the liv
 
 A branch stores only its own divergence. Everything it did not change must fall through to its parent, at the fork point — recursively.
 
-**Resolution.** Walk the branch's ancestry to build a *segment chain*: an ordered list of `(branch_id, seq)` pairs from the target branch down to the root branch, where each entry's `seq` is the fork point at which the next branch diverged.
+**Resolution.** A branch's *segment chain* is an ordered list of `(branch_id, seq)` pairs from the branch down to the root, index 0 highest priority. It is **stored, not derived** — `datagit_ref.chain` holds the inherited tail, and prepending the branch itself gives the chain:
 
 ```
 resolve(B, c):
-  segments := [(B, c)]
-  cur := B
-  while cur.parent_ref is not null:
-      segments.append((cur.parent_ref, seq_of(cur.fork_commit)))
-      cur := cur.parent_ref
+  segments := [(B, c)] ++ B.chain
   # segments[0] is highest priority
 ```
+
+**Phase 0 finding F1: never rebuild this by walking parent refs at read time.** `UpdateFromParent` (§9.6) advances a branch's fork point. A chain re-derived afterwards reads every ancestor at whatever position it has since reached, with two silent consequences: a branch that forked from it inherits rows it never asked for, and a read of an older commit resolves its tail against the parent's *current* state. Each object that names a point in history therefore carries its own chain — branches at fork (`datagit_ref.chain`), commits at commit (`datagit_commit.chain`), sessions via their base commit (§6.2). Absorbing a parent rewrites only the absorbing branch's tail.
 
 Then, for each primary key, take the version from the highest-priority segment that has one:
 
@@ -542,7 +571,11 @@ MySQL uses `ROW_NUMBER() OVER (PARTITION BY sku ORDER BY prio)` with an outer `W
 
 **Deletes must not fall through.** A `op = 3` tombstone on a high-priority segment wins resolution and is then filtered out, so the row is absent. Filtering `op <> 3` *inside* the union arms instead would be a correctness bug — the inherited row would resurface. This is the most likely place for a subtle mistake in an implementation and is called out for that reason.
 
-**Filters must not be pushed into the arms either.** Same shape of bug. If a branch changes a row so it no longer matches `category = 'outdoor'`, pushing that predicate into each arm removes the row from the branch's arm, and the parent's still-matching version resurfaces as the winner. A filter is only meaningful against the *resolved* row.
+**Value filters must not be pushed into the arms either.** Same shape of bug. If a branch changes a row so it no longer matches `category = 'outdoor'`, pushing that predicate into each arm removes the row from the branch's arm, and the parent's still-matching version resurfaces as the winner. A value filter is only meaningful against the *resolved* row.
+
+Both hazards were reproduced against 51.4M versions in S1: filtering `op <> 3` inside the arms resurfaced 140,000 deleted rows at depth 8, and pushing a category predicate into the arms returned 1,400 rows that do not match the resolved data.
+
+**The primary key is the one safe exception, and point reads depend on it.** A row's primary key *is* its identity for all of history (§3.2) — no version of a row ever carries a different key — so `sku = ?` inside every arm cannot change which version wins for that key. It only stops the scan considering other keys. Pushing the key predicate down is therefore both correct and the reason point reads are fast. No other predicate has this property, because no other column is immutable.
 
 Resolving the whole table and then filtering is correct but O(table). The design uses a **two-pass** form that is both correct and proportional to the result:
 
@@ -572,7 +605,11 @@ SELECT * FROM (
 WHERE r.op <> 3 AND r.category = :f;
 ```
 
-Correctness argument: if a key's resolved row matches the filter, that row came from some segment's arm, where it matched, so the key is in `cand`. Pass 2 evaluates the filter against the true winner and discards the false positives. Cost is proportional to the number of matching versions across the segments, not to the table. Pass 1 uses a per-column index on the filtered column when one exists ([§14.3](#143-optimizations)); without one it is a range scan per segment over the interval index — bounded by segment size, never by table size. Both hazards in this section are standing invariants in the property-test harness, not unit tests.
+Correctness argument: if a key's resolved row matches the filter, that row came from some segment's arm, where it matched, so the key is in `cand`. Pass 2 evaluates the filter against the true winner and discards the false positives. Cost is proportional to the number of matching versions across the segments, not to the table.
+
+**Pass 1 requires an index on the filtered column.** Without one it degrades to a full scan of every segment. S1 measured that at 51.4M versions: roughly 20 seconds per filtered read, against milliseconds with the index. Per-column indexes are therefore part of a `versioned` table's configuration for any column curators filter or predicate-update on, not the optional tuning knob [§14.3](#143-optimizations) once called them — Phase 0 finding F7.
+
+Both hazards in this section are standing invariants in the property-test harness, not unit tests.
 
 **Reads inside a session** prepend a segment of priority −1 containing the session's staged rows (`session_id = :s`), so a session sees its own uncommitted work layered over the branch.
 
@@ -690,7 +727,23 @@ For each tracked table, for each primary key appearing in `ΔA ∪ ΔB`, compare
 | **Delete / modify** | present | delete | modify | **conflict** — never guessed |
 | Delete / unchanged | present | delete | = b | delete |
 
-Cell-level merging is what `changed_cols` exists for: the mask says exactly which columns each side touched, so disjointness is a bitmask AND rather than a value-by-value comparison against the base. Two curators editing `price` and `description` on the same product never collide.
+Cell-level merging is what `changed_cols` exists for. Two curators editing `price` and `description` on the same product never collide.
+
+**The mask narrows which columns are examined. It never decides the outcome.** Phase 0 finding F2: a set bit means "some write in this range touched this column", not "this column differs from the base" — a branch that changes a column and changes it back leaves the bit set with the value unchanged. So:
+
+| | sound? |
+|---|---|
+| masks disjoint ⇒ merge clean | yes |
+| masks overlap ⇒ conflict | **no — must compare values** |
+
+The case table above is written in terms of values, and Git behaves the same way: change a line and change it back, and there is no conflict. Treating a set bit as proof of change would manufacture conflicts the table calls clean. Columns outside the union of both masks were touched by neither side and still hold the base value; columns inside it are compared cell by cell.
+
+**Computing "changed since base" is a chain diff, not a parent walk.** Two further Phase 0 findings constrain it:
+
+- **F4.** `UpdateFromParent` advances a fork point and then prunes overlay rows that now match the parent (§9.6 step 5), so a branch's effective state can change with *nothing written to its own overlay*. Accumulate by diffing the base commit's chain against the branch's current chain, segment by segment; a segment absent from the base chain is new in its entirety.
+- **F5.** A branch differs from the base by **lacking** changes the base carries as well as by adding changes it does not — routine when a branch forked before its parent advanced and the merge base sits at the parent's later commit. Order the two bounds before accumulating, so the candidate set is a superset of the *symmetric* difference. Accumulating only the forward range silently keeps base values for every column in the backward range.
+
+A branch's local `seq` and its parent's `seq` are different sequence spaces and are never compared (§3.3); each segment is bounded against its own branch's seq only.
 
 **Delete/modify is always a conflict.** Neither answer is safe to assume — one side believes the row should not exist, the other believes it should exist with new content. Any automatic resolution silently discards someone's intent.
 
@@ -874,13 +927,15 @@ Rule 3 has a consequence for `changed_cols`: the bitmask is over column *ids*, n
 | Contention | Mechanism |
 |---|---|
 | Two writers, same row, same branch | `SELECT ... FOR UPDATE` on the live row (`main`) or the open sidecar version (branch). |
-| Two commits, same branch | Advisory lock on the ref, held for the commit transaction. Serializes `seq` assignment. |
+| Two commits, same branch | Advisory lock on the ref, held for the commit transaction. Serializes `seq` assignment — and therefore caps branch commit throughput; see below. `audit` tables bypass it entirely. |
 | Two sessions, same branch, same key | Independent until commit; staged rows are session-private. The second `CommitSession` fails its `expected_head` check and re-resolves. |
 | Two merges into the same branch | Same ref lock. The second re-validates against the moved head. |
 | Merge vs. concurrent write to `main` | Ref lock; the writer waits. Merge apply is short because the change set is already computed. |
 | Migration apply vs. writes | Ref lock plus a table-level guard; writers wait up to a timeout, then fail with a retryable error. |
 
 MySQL's `GET_LOCK` is session-scoped rather than transaction-scoped, so the adapter releases explicitly on transaction end and a reaper clears locks held by dead sessions.
+
+**The ref lock is a throughput ceiling, and it is measured.** Because every commit to a branch takes it, throughput is 1/(commit duration) — Phase 0 measured ~850 commits/s on a single branch, unchanged from 1 writer to 100. Concurrency past that point buys queueing, not throughput. Two design consequences, both in [§14.1](#141-recommended-target-mixed-per-table-opt-in): write rates are quoted in rows/s and assume batching, and the `audit` tier orders by a database sequence instead of taking the lock, because it never branches and could not otherwise reach a machine-driven write rate.
 
 ---
 
@@ -968,42 +1023,60 @@ Point 4 is the important one. A purged commit's hash **no longer matches its con
 
 ### 14.1 Recommended target: mixed, per-table opt-in
 
-Uniform targets would be dishonest: the two use cases have different shapes. The recommendation is the two-tier model from [§3.4](#34-tracking-modes), with these **design targets** (targets to build and benchmark against — not measured results):
+Uniform targets would be dishonest: the two use cases have different shapes. The recommendation is the two-tier model from [§3.4](#34-tracking-modes).
+
+**Measured** figures below are from Phase 0 on PostgreSQL 17, against 51.4M versions with 10M live keys and an eight-deep branch chain (`docs/phase0/findings.md`). Remaining entries are still targets and are marked as such. MySQL is unmeasured until v1.1.
 
 | | `audit` tier | `versioned` tier |
 |---|---|---|
-| Rows per table | up to ~500 M (partitioned sidecar) | up to ~50 M |
-| Write throughput | ~10 k writes/s per repository | ~1 k writes/s per repository |
+| Rows per table | up to ~500 M (partitioned sidecar) *(target)* | up to ~50 M |
+| **Commits/s to one branch** | see the ceiling below | **~850 measured, independent of writer count** |
+| Rows/s, batched | ~20 k *(target, batched)* | **~20 k measured** at 1 000-row commits |
 | Commits | continuous, machine-driven | 10²–10³ per day, human-driven |
-| Concurrent branches | n/a | 10²; hard cap 10³ per repository |
-| Added write latency (p99) | < 2 ms | < 5 ms |
-| Branch creation | — | < 50 ms, O(1), no data copied |
-| Diff of 10 k changed rows | — | < 1 s |
-| Merge of 10 k changed rows | — | < 10 s including validation and apply |
+| Concurrent branches | n/a | 10²; hard cap 10³ per repository *(target)* |
+| Added write latency (p99), single-row commit | < 2 ms *(target)* | **1.70 ms measured** |
+| Point read by primary key, p95, depth 3 | — | **2.09 ms measured** |
+| Filtered read, 0.1% selectivity, paged to 100, p95, depth 3 | — | **206 ms measured** |
+| Branch creation | — | O(1), no data copied |
+| Storage at rest, excluding history | **~1.5× measured** | **3.33× measured** |
+| Write amplification | lower — fewer indexes | **~9× measured** ([§14.2](#142-where-the-cost-is)) |
 | `main` read latency | **unchanged — DataGit is not on the path** | **unchanged** |
 
-Rationale: `versioned` mode's costs are dominated by the resolution query and merge validation, which are correctness-critical and hard to make fast on arbitrary data — so it targets curated datasets, where "50 million rows" is generous. `audit` mode is a single append per write and scales with partitioning. Forcing one target across both would either cripple curation features or make audit unaffordable on hot tables.
+### The per-branch commit ceiling
 
-These targets are for PostgreSQL. MySQL is expected to trail on branch reads ([§4.3](#43-the-engine-adapter)); its targets are set after S1 measures it, not assumed, and the [§7.6](#76-fallback-materialized-branch-heads) fallback exists for the case where it trails too far.
+**Commits to a single branch are serialized by the ref lock ([§11.3](#113-concurrency-control)), so throughput is capped at 1/(commit duration) — measured at ~850 commits/s — no matter how many application instances write.** Adding concurrency adds queueing, not throughput: at 100 concurrent writers, throughput stayed at 776/s while p99 latency rose from 1.9 ms to 231 ms.
+
+Two consequences, both of which the tier table above now reflects:
+
+- **Write-rate expectations must be expressed in rows/s with an explicit batching assumption.** A client issuing single-row commits gets ~850 rows/s per branch. The same client batching 1 000 rows per commit gets ~20 k rows/s. The SDK buffers client-side and sends one `Commit` ([§6.1](#61-writing-to-main)) precisely so that batching is the default shape.
+- **The `audit` tier must not take the ref lock at all.** An `audit` table never branches, so it does not need a per-branch linear commit sequence and cannot reach a machine-driven write rate while serialized. It orders by a database sequence instead. This is a genuine tier difference, not an optimization.
+
+Rationale for the split: `versioned` mode's costs are dominated by the resolution query and merge validation, which are correctness-critical and hard to make fast on arbitrary data — so it targets curated datasets, where "50 million rows" is generous. `audit` mode is a single append per write and scales with partitioning.
+
+Forcing one target across both would either cripple curation features or make audit unaffordable on hot tables.
+
+These figures are for PostgreSQL. MySQL is expected to trail on branch reads ([§4.3](#43-the-engine-adapter)); its numbers are measured in v1.1, not assumed, and the [§7.6](#76-fallback-materialized-branch-heads) fallback exists for the case where it trails too far.
 
 ### 14.2 Where the cost is
 
 | Operation | Cost | Bounded by |
 |---|---|---|
 | `main` read | zero DataGit cost | — |
-| `main` write | 1 live write + 1–2 sidecar writes, one transaction | write amplification ≈ 2–3× |
+| `main` write | 1 live write + 2 sidecar writes + commit record + ref update, one transaction | write amplification **≈ 9× measured** |
 | Branch write | 1–2 sidecar writes | no live-table impact at all |
 | Branch read | one index range scan per segment + merge | segment cap of 8 |
 | Diff | index range scan | size of the change |
 | Merge | diff + validation + apply | size of the change × constraint count |
 | Materialization | full table copy | size of the data — the honest, stated cost of the escape hatch |
-| Storage, `versioned` | ~2× data + four sidecar indexes ≈ 3–4× base, + full history | retention policy |
-| Storage, `audit` | ~1.5× base (closed intervals + indexes) + full history | retention policy |
+| Storage, `versioned` | **3.33× base measured** at rest, + full history | retention policy |
+| Storage, `audit` | **~1.5× base measured** at rest, + full history | retention policy |
+
+**Write amplification deserves its own paragraph, because the original estimate was wrong.** §14.2 previously claimed 2–3×; Phase 0 measured **8.7–9.4×** in WAL bytes, flat across change-set sizes. The estimate counted row writes and ignored index maintenance, which dominates: each commit touches the live row and its indexes, two sidecar rows, four sidecar indexes on each, the commit record, and the ref row. The levers are dropping the `commit_id` index — the interval index can answer "what did this commit change" via a seq range — and giving the `audit` tier a smaller index set, since it needs neither the resolve nor the session index. Both are M4 performance work, not blockers, but the corrected figure belongs in front of anyone sizing a deployment.
 
 ### 14.3 Optimizations
 
 - **Partition sidecars** by `(branch_id, seq_from)` range on both engines. Dropping a pruned partition beats deleting rows by orders of magnitude.
-- **Index only what resolution needs.** The four indexes in [§5.2](#52-version-sidecars) are the required set. Additional indexes on mirrored value columns are opt-in per column: they turn pass 1 of a filtered branch read ([§7.3](#73-an-arbitrary-branch-at-an-arbitrary-commit)) into an index lookup instead of a segment scan, and each one is paid on every write.
+- **Index what resolution needs, and what curators filter by.** The four indexes in [§5.2](#52-version-sidecars) are the required set for resolution itself. A per-column index on each mirrored value column that gets filtered or predicate-updated is **also required in practice**, not optional: it is what turns pass 1 of a filtered branch read ([§7.3](#73-an-arbitrary-branch-at-an-arbitrary-commit)) from a full segment scan into an index lookup. S1 measured roughly 20 seconds versus milliseconds at 51.4M versions (finding F7). Each such index is paid on every write, so the set should be chosen deliberately — but choosing none makes filtered branch reads unusable.
 - **Batch writes.** The SDK's transaction object buffers changes and issues multi-row statements, amortizing round trips.
 - **Route historical reads to replicas** when configured; they never need write consistency.
 - **Prepared statement cache** keyed by `(table, schema_epoch, segment_count)`, since resolution query shapes are highly repetitive.

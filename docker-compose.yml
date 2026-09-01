@@ -1,0 +1,57 @@
+# Development databases for DataGit.
+# PostgreSQL 16 and 17 per PLAN.md M0.2. MySQL 8.4 is added in M5 (v1.1).
+services:
+  pg17:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: datagit
+      POSTGRES_PASSWORD: datagit
+      POSTGRES_DB: datagit
+    ports: ["55417:5432"]
+    volumes: ["pg17data:/var/lib/postgresql/data"]
+    shm_size: 1gb
+    # Tuned for the Phase 0 spikes: large synthetic sidecars, heavy index builds.
+    command: >
+      postgres
+      -c shared_buffers=2GB
+      -c work_mem=256MB
+      -c maintenance_work_mem=1GB
+      -c max_wal_size=8GB
+      -c checkpoint_timeout=30min
+      -c random_page_cost=1.1
+      -c effective_cache_size=6GB
+      -c track_io_timing=on
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datagit"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  pg16:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: datagit
+      POSTGRES_PASSWORD: datagit
+      POSTGRES_DB: datagit
+    ports: ["55416:5432"]
+    volumes: ["pg16data:/var/lib/postgresql/data"]
+    shm_size: 1gb
+    command: >
+      postgres
+      -c shared_buffers=2GB
+      -c work_mem=256MB
+      -c maintenance_work_mem=1GB
+      -c max_wal_size=8GB
+      -c checkpoint_timeout=30min
+      -c random_page_cost=1.1
+      -c effective_cache_size=6GB
+      -c track_io_timing=on
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datagit"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  pg17data:
+  pg16data:
