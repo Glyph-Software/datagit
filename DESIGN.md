@@ -285,10 +285,18 @@ CREATE TABLE datagit_v_products (
     PRIMARY KEY (branch_id, sku, seq_from)
 );
 
+-- Three indexes, not four. Phase 0 finding F11 measured the write cost of each:
+--   * resolve  — per-key lookup, the point-read path
+--   * range    — interval scans for diff and historical reads. seq_to is
+--                deliberately NOT in it: including it makes every close-the-open-
+--                version UPDATE non-HOT, which rewrites every index entry for the
+--                row. seq_to is applied as a filter instead.
+--   * session  — partial, so it indexes only staged rows (plain index on MySQL)
+-- The commit_id index was dropped: "what did this commit change" is answered by
+-- a seq_from range on the range index.
 CREATE INDEX v_products_resolve  ON datagit_v_products (branch_id, sku, seq_from DESC);
-CREATE INDEX v_products_range    ON datagit_v_products (branch_id, seq_from, seq_to);
-CREATE INDEX v_products_commit   ON datagit_v_products (commit_id);
-CREATE INDEX v_products_session  ON datagit_v_products (session_id) WHERE session_id IS NOT NULL;  -- plain index on MySQL
+CREATE INDEX v_products_range    ON datagit_v_products (branch_id, seq_from);
+CREATE INDEX v_products_session  ON datagit_v_products (session_id) WHERE session_id IS NOT NULL;
 ```
 
 Four decisions embedded here, each with a cost:
@@ -1039,7 +1047,7 @@ Uniform targets would be dishonest: the two use cases have different shapes. The
 | Filtered read, 0.1% selectivity, paged to 100, p95, depth 3 | — | **206 ms measured** |
 | Branch creation | — | O(1), no data copied |
 | Storage at rest, excluding history | **~1.5× measured** | **3.33× measured** |
-| Write amplification | lower — fewer indexes | **~9× measured** ([§14.2](#142-where-the-cost-is)) |
+| Write amplification | lower — fewer indexes | **~6× measured** ([§14.2](#142-where-the-cost-is)) |
 | `main` read latency | **unchanged — DataGit is not on the path** | **unchanged** |
 
 ### The per-branch commit ceiling
@@ -1062,7 +1070,7 @@ These figures are for PostgreSQL. MySQL is expected to trail on branch reads ([�
 | Operation | Cost | Bounded by |
 |---|---|---|
 | `main` read | zero DataGit cost | — |
-| `main` write | 1 live write + 2 sidecar writes + commit record + ref update, one transaction | write amplification **≈ 9× measured** |
+| `main` write | 1 live write + 2 sidecar writes + commit record + ref update, one transaction | write amplification **≈ 6× measured** |
 | Branch write | 1–2 sidecar writes | no live-table impact at all |
 | Branch read | one index range scan per segment + merge | segment cap of 8 |
 | Diff | index range scan | size of the change |
@@ -1071,12 +1079,30 @@ These figures are for PostgreSQL. MySQL is expected to trail on branch reads ([�
 | Storage, `versioned` | **3.33× base measured** at rest, + full history | retention policy |
 | Storage, `audit` | **~1.5× base measured** at rest, + full history | retention policy |
 
-**Write amplification deserves its own paragraph, because the original estimate was wrong.** §14.2 previously claimed 2–3×; Phase 0 measured **8.7–9.4×** in WAL bytes, flat across change-set sizes. The estimate counted row writes and ignored index maintenance, which dominates: each commit touches the live row and its indexes, two sidecar rows, four sidecar indexes on each, the commit record, and the ref row. The levers are dropping the `commit_id` index — the interval index can answer "what did this commit change" via a seq range — and giving the `audit` tier a smaller index set, since it needs neither the resolve nor the session index. Both are M4 performance work, not blockers, but the corrected figure belongs in front of anyone sizing a deployment.
+**Write amplification deserves its own paragraph, because both the original estimate and the criterion set against it were wrong.**
+
+§14.2 previously claimed 2–3×. Phase 0 measured, in WAL bytes with a warmup pass so full-page writes do not dominate:
+
+| Configuration | Amplification |
+|---|---|
+| As originally designed | 6.4–8.4× |
+| **With the two index changes below (adopted)** | **5.2–6.3×** |
+| Append-only sidecar (not adopted — see below) | 3.0–4.1× |
+
+The estimate counted row writes and ignored index maintenance, which dominates: each commit touches the live row and its indexes, two sidecar rows, their indexes, the commit record, and the ref row. The ratio is flat across change-set sizes, confirming it is per-row index cost rather than amortizable overhead — so batching, the originally proposed remedy, is not the lever.
+
+**Adopted:** the `commit_id` index is dropped (the interval index answers "what did this commit change" via a seq range on `seq_from`), and `seq_to` is dropped from the range index. Together these take ~6.4–8.4× down to ~5.2–6.3×.
+
+**The ≤3× bar is not reachable with this storage model and has been restated at ~6×.** The design inherently writes a sidecar row plus its index maintenance for every changed row, on top of the live write. Leaving an unreachable bar in place would make every future measurement look like a failure.
+
+**Considered and deferred: an append-only sidecar.** Most of the remaining cost is the UPDATE that closes the previous open version — non-HOT whenever `seq_to` is indexed, so it rewrites every index entry for the row. Dropping `seq_to` entirely and letting a version's validity end at the next version of the same key removes that write and reaches 3.0–4.1×, with point reads measured slightly *faster* (144 µs vs 167 µs p50). It costs 5.4× on full branch scans, because "all live rows at seq c" stops being a range predicate and becomes a top-1-per-key aggregate.
+
+It is not adopted now because the measurement covered a single segment. Branch resolution across a chain would need that aggregate *per arm* before the priority merge — a materially different shape from the interval predicate this entire read path is built on, and the shape that matters most, since branch reads are the common case. M4 measures it against the real multi-segment query and decides then.
 
 ### 14.3 Optimizations
 
 - **Partition sidecars** by `(branch_id, seq_from)` range on both engines. Dropping a pruned partition beats deleting rows by orders of magnitude.
-- **Index what resolution needs, and what curators filter by.** The four indexes in [§5.2](#52-version-sidecars) are the required set for resolution itself. A per-column index on each mirrored value column that gets filtered or predicate-updated is **also required in practice**, not optional: it is what turns pass 1 of a filtered branch read ([§7.3](#73-an-arbitrary-branch-at-an-arbitrary-commit)) from a full segment scan into an index lookup. S1 measured roughly 20 seconds versus milliseconds at 51.4M versions (finding F7). Each such index is paid on every write, so the set should be chosen deliberately — but choosing none makes filtered branch reads unusable.
+- **Index what resolution needs, and what curators filter by.** The three indexes in [§5.2](#52-version-sidecars) are the required set for resolution itself. A per-column index on each mirrored value column that gets filtered or predicate-updated is **also required in practice**, not optional: it is what turns pass 1 of a filtered branch read ([§7.3](#73-an-arbitrary-branch-at-an-arbitrary-commit)) from a full segment scan into an index lookup. S1 measured roughly 20 seconds versus milliseconds at 51.4M versions (finding F7). Each such index is paid on every write, so the set should be chosen deliberately — but choosing none makes filtered branch reads unusable.
 - **Batch writes.** The SDK's transaction object buffers changes and issues multi-row statements, amortizing round trips.
 - **Route historical reads to replicas** when configured; they never need write consistency.
 - **Prepared statement cache** keyed by `(table, schema_epoch, segment_count)`, since resolution query shapes are highly repetitive.

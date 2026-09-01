@@ -379,6 +379,9 @@ func main() {
 		concurrency(ctx, pool)
 	case "amplification":
 		amplification(ctx, pool)
+	case "variants":
+		variantAmplification(ctx, pool)
+		variantResolveCheck(ctx, pool)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown mode")
 		os.Exit(2)

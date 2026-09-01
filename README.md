@@ -151,7 +151,7 @@ Commits are hash-chained, so history is tamper-evident — with an honest limit,
 
 - **Adoption is a write-path rewrite.** See above. There is no drop-in mode.
 - **Storage.** A `versioned` table costs 3.3× its size at rest once the sidecar and its indexes are counted, plus history proportional to churn. Retention policies and garbage collection bound the growth.
-- **Write amplification is about 9×**, measured in write-ahead-log bytes. Most of it is index maintenance on the sidecar, not the extra rows themselves. This is the number most likely to surprise you when sizing a deployment.
+- **Write amplification is about 6×**, measured in write-ahead-log bytes. Most of it is index maintenance on the sidecar, not the extra rows themselves. This is the number most likely to surprise you when sizing a deployment.
 - **Write latency.** Commits go through a network hop and do more work in the transaction. Measured at 1.7 ms added at p99 for a single-row commit.
 - **Commit throughput per branch is capped.** Commits to one branch are serialized so their sequence numbers are ordered, which measures at roughly 850 commits per second regardless of how many application instances write. Batch your writes: one commit carrying a thousand rows reaches about 20,000 rows per second. High-volume `audit` tables bypass the serialization entirely.
 - **Discipline.** The guarantee "the live table is `main@HEAD`" holds only while writes go through DataGit. Optional trigger guards can reject or capture out-of-band writes, but nothing makes them free, and the guard stops accidents, not adversaries.

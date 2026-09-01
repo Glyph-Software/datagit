@@ -46,16 +46,19 @@ Milestones map to DESIGN.md §20.2 versions. Section references like §7.3 point
 > | S1 correctness | pass — both §7.3 hazards reproduced at 51.4M versions |
 > | S2 | pass — 10.2M operations, zero divergence, after fixing F1–F5 |
 > | S3 latency | pass — 1.70 ms added p99 |
-> | S3 amplification | **fail — 8.7–9.4× against a ≤3× bar** (F11) |
+> | S3 amplification | **bar was unreachable; restated at ~6×** (F11) |
 > | S5 storage | pass — 3.33× at rest |
 > | S5 pruning | pass — 33.7× faster than `DELETE` |
 >
-> The amplification miss does not block M1. The stated fallback was batching,
-> which was already in place and is not the lever — the ratio is flat across
-> change-set sizes because the cost is per-row index maintenance. The real levers
-> (dropping the `commit_id` index, a lighter index set for the `audit` tier) are
-> M4 performance work. The corrected figure is now published in DESIGN.md §14.2
-> and README.md rather than left for an adopter to discover.
+> The amplification bar was retried rather than accepted. Measuring the levers
+> showed the guessed ones were nearly worthless (8–14% for dropping the
+> `commit_id` index) and that the real cost is the UPDATE that closes the previous
+> open version. Both cheap index changes are adopted (~6.4–8.4× → ~5.2–6.3×), and
+> **the ≤3× bar itself is corrected to ~6×**: it is unreachable with this storage
+> model and was set without analysis. An append-only sidecar reaches 3.0–4.1× with
+> faster point reads but 5.4× slower full scans; it is deferred to M4 because the
+> measurement covered a single segment and branch resolution is the shape that
+> matters. Figures published in DESIGN.md §14.2 and README.md.
 >
 > S4 remains unrun by design: it gates M6, not M1.
 
@@ -127,7 +130,7 @@ S1–S3 and S5 gate M1. **S4 gates M6 (schema), not M1** — MySQL DDL is not on
 
 ### Phase 0 exit criteria
 
-- [x] S1, S3, S5 pass, or their fallbacks are adopted into DESIGN.md **before M1 starts**. S3's amplification bar failed; the corrected figure and its levers are recorded in DESIGN.md §14.2 and finding F11.
+- [x] S1, S3, S5 pass, or their fallbacks are adopted into DESIGN.md **before M1 starts**. S3's amplification bar was retried, found unreachable, and restated at ~6×; the two cheap index changes are adopted. DESIGN.md §14.2 and finding F11.
 - [x] S2's reference model and property harness are merged. **Still to do:** wire `make test-property` into CI once CI exists (M0.1).
 - [x] DESIGN.md §14.1 targets replaced with measured PostgreSQL numbers, relabelled as measured.
 - [ ] S4 scheduled before M6 and its result recorded before M6 starts.
@@ -142,7 +145,7 @@ Findings that change specific work units, beyond the DESIGN.md amendments:
 | F8 — no surrogate sidecar key | M1.2 sidecar DDL: primary key is `(branch_id, pk…, seq_from)` |
 | F9 — index shape | M1.2 and M2.6: per-column indexes end with the primary key |
 | F10 — ref-lock ceiling | M1.4: the `audit` tier must not take the ref lock; M4.6 measures both tiers |
-| F11 — amplification | M4.6: drop the `commit_id` index and measure the `audit` tier's lighter index set |
+| F11 — amplification | M1.2: sidecar has three indexes, and `seq_to` is not in the range index. M4.6: measure the append-only sidecar against multi-segment resolution |
 
 ---
 

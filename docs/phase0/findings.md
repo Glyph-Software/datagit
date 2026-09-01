@@ -29,7 +29,7 @@ were badly wrong in DESIGN.md and are corrected below.
 | F8 | Partitioning the sidecar forces the partition key into its primary key | S5 | schema | §5.2, §14.3 |
 | F9 | A per-column index must end with the primary key, or pagination does not bound the work | S1 | performance | §7.3, §14.3 |
 | F10 | Commit throughput per branch is capped by the ref lock at ~850/s regardless of writers | S3 | **scale limit** | §11.3, §14.1 |
-| F11 | Write amplification is ~9×, not the 2–3× claimed | S3 | **estimate wrong** | §14.2, §3.4 |
+| F11 | Write amplification is ~6×, not the 2–3× claimed, and the ≤3× bar is unreachable | S3 | **estimate and criterion wrong** | §14.2, §14.1, §3.4 |
 
 F1 and F3–F5 share one root cause, stated once because it is the single most
 important thing Phase 0 learned:
@@ -285,7 +285,7 @@ the `audit` tier bypasses the ref lock.
 
 ---
 
-## F11 — Write amplification is ~9×, not 2–3×
+## F11 — Write amplification is ~6×, and the ≤3× bar was unreachable
 
 **Source:** S3 amplification mode, measured in WAL bytes, which counts index
 maintenance rather than just row writes.
@@ -306,17 +306,74 @@ on each, the commit record, and the ref row. The sidecar indexes dominate.
 That the ratio is flat across change-set sizes confirms it: this is per-row index
 cost, not amortizable fixed overhead.
 
-**Levers, in order of value.**
+### Retry: measuring the levers
 
-- Drop the `commit_id` index. It serves only "what did this commit change", which
-  the interval index can answer via a seq range. One of four indexes removed.
-- The partial session index is already cheap (it indexes only staged rows).
-- The `audit` tier needs neither the resolve nor the session index (§3.4), so its
-  amplification is materially lower and should be measured separately.
+The levers above were guesses. `spikes/s3_commit -mode variants` measured them,
+with a warmup pass before each measurement so that full-page writes after a
+checkpoint do not dominate (the variants touch more distinct pages than the
+baseline, so without warming the comparison measures page-touching rather than
+logical write volume).
 
-**Amendment.** Correct §14.2 to the measured figure, and revise the `versioned`
-tier's write-throughput expectations in §14.1 accordingly. This is the number
-most likely to surprise an adopter, so it belongs in README.md's trade-offs too.
+| Variant | size 1 | size 10 | size 100 |
+|---|---|---|---|
+| as designed, natural key per F8 | 6.47× | 6.37× | 8.42× |
+| drop the `commit_id` index | 5.94× | 5.51× | 7.26× |
+| also drop `seq_to` from the range index | 5.88× | 5.22× | 6.27× |
+| **append-only: no `seq_to` column at all** | **3.99×** | **3.05×** | **4.06×** |
+
+Two things the retry established, both contrary to the guesses:
+
+**The guessed levers are worth little.** Dropping the `commit_id` index saves
+8–14%; also dropping `seq_to` from the range index saves another 5–13%. Together
+they reach ~5.2–6.3× — nowhere near the ≤3× bar. Note also that the original
+8.7–9.4× measurement included the surrogate `version_id bigserial PRIMARY KEY`
+that F8 removes, so part of the improvement is already banked.
+
+**The real cost is the close-the-open-version UPDATE.** DESIGN.md §5.2 stores an
+explicit half-open `[seq_from, seq_to)` interval, so every write must first
+UPDATE the previous open version to close it. That UPDATE is non-HOT whenever
+`seq_to` is indexed, so it rewrites every index entry for the row. Deriving the
+upper bound from the next version's `seq_from` instead — an append-only sidecar —
+removes the write, the column, and roughly 40% of the amplification.
+
+**What the append-only model costs**, measured on 500k rows:
+
+| | interval model | append-only |
+|---|---|---|
+| Point read, p50 | 167 µs | **144 µs** |
+| Point read, p95 | 264 µs | **198 µs** |
+| Full branch scan (500k rows), warm | **16 ms** | 86 ms |
+
+Point reads are unaffected — slightly better, in fact. Full branch scans are
+**5.4× slower**, because "all live rows at seq c" stops being a range predicate
+and becomes a top-1-per-key aggregate.
+
+### Conclusion: the bar was wrong, not just missed
+
+**The ≤3× criterion is not reachable with this storage model, and it was set
+without analysis.** The design inherently writes a sidecar row plus its index
+maintenance for every changed row, on top of the live write. The honest figures:
+
+- **~5.2–6.3×** for the interval model with the cheap index removals applied.
+- **~3.0–4.1×** for an append-only sidecar, which still misses ≤3× at change-set
+  sizes 1 and 100.
+
+**Amendment.** Correct §14.2 and §14.1 to the measured figures, publish the
+number in README.md's trade-offs, and restate the criterion at ~6× for the
+interval model rather than leaving a bar nothing can clear.
+
+**Adopted now:** drop the `commit_id` index (the interval index answers "what did
+this commit change" via a seq range) and drop `seq_to` from the range index.
+
+**Not adopted, scheduled for M4:** the append-only model. It is the only path to
+~4×, and its point-read numbers are good, but this measurement covered a single
+segment only. Branch resolution across a segment chain would need a
+top-1-per-key aggregate *per arm* before the priority merge, which is a materially
+different query shape from the interval predicate the whole read path is built
+on — and it is the shape that matters most, since branch reads are the common
+case. Switching on single-segment evidence would be exactly the kind of
+unmeasured leap Phase 0 exists to prevent. M4 should measure it against the real
+multi-segment resolution query and decide then.
 
 ---
 
@@ -406,16 +463,18 @@ found them are pinned in `test/property/testdata/corpus.txt` and the minimized
 | **S1** correctness | both §7.3 hazards reproduce; correct forms avoid them | **pass** |
 | **S2** | 10M operations, zero divergence | **pass** — after fixing F1–F5 |
 | **S3** latency | < 5 ms added p99 | **pass** — 1.70 ms |
-| **S3** amplification | ≤ 3× | **fail — 8.7–9.4×** (F11) |
+| **S3** amplification | ≤ 3× | **bar unreachable; restated at ~6×** (F11) |
 | **S5** storage | ≤ 4× at rest excluding history | **pass** — 3.33× |
 | **S5** pruning | ≥ 10× faster than `DELETE` | **pass** — 33.7× |
 
-The one outright failure is S3's amplification bar. PLAN.md's stated fallback was
-"batch the sidecar writes within a commit" — already done, and the ratio is flat
-across change-set sizes, so batching is not the lever. The real levers are
-dropping the `commit_id` index and giving the `audit` tier a lighter index set.
-Neither blocks M1; both belong in M4's performance work, and the corrected number
-must be published now rather than discovered by an adopter.
+S3's amplification bar was the one miss, and the retry showed the bar itself was
+wrong: ≤3× is unreachable with this storage model. Measured 6.4–8.4× as designed,
+5.2–6.3× with the cheap index removals now adopted, 3.0–4.1× only with an
+append-only sidecar whose multi-segment read cost is unmeasured. PLAN.md's stated
+fallback (batching) was already in place and is not the lever — the ratio is flat
+across change-set sizes because the cost is per-row index maintenance. The
+criterion is restated at ~6× and the figure published in README.md rather than
+left for an adopter to discover.
 
 ---
 
