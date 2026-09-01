@@ -43,6 +43,10 @@ Two use cases drive every trade-off in this document:
 
 Where these two pull in different directions, **audit wins on correctness questions and curation wins on ergonomics questions.**
 
+**Curation is the wedge; audit is what makes it trustworthy.** Audit alone is weakly differentiated — a trigger-populated history table delivers most of it with no application change. What no existing tool offers without replacing the database is *branch, review, and merge for rows*. That is the capability this design is built around, and audit-grade history is the property that makes a merged change worth trusting.
+
+**The adoption cost is real and should be stated up front.** DataGit owns writes. An application adopts it by routing every write to a tracked table through DataGit's API — not by pointing a connection string somewhere else. For an existing application with a mature data-access layer, that is a rewrite of the write paths for the tables in question. The realistic first adopters are greenfield services and applications that can wall off a curated-data subsystem — a pricing service, a reference-data service — behind the API while the rest of the system continues untouched. Anyone expecting a drop-in should stop here; [§19.1](#191-rejected-a-postgresqlmysql-wire-protocol-proxy) explains why a drop-in was rejected.
+
 ### 1.2 Goals
 
 | # | Goal |
@@ -53,9 +57,9 @@ Where these two pull in different directions, **audit wins on correctness questi
 | G4 | **Branch creation is O(1)** in both time and storage. |
 | G5 | **Diff and merge cost scales with the size of the change**, not the size of the table. |
 | G6 | **Cell-level three-way merge**, so disjoint edits to the same row combine without human involvement. |
-| G7 | **Schema changes are versioned, diffable, and mergeable** — not a hole in the model. |
+| G7 | **Schema changes are versioned, diffable, and mergeable** — not a hole in the model. Designed from the start; ships in v1.2. |
 | G8 | **Right-to-erasure is achievable** without abandoning the integrity guarantees that make the audit trail worth having. |
-| G9 | **Two database engines** (PostgreSQL, MySQL) behind one adapter interface, with an honest account of where their behaviour differs. |
+| G9 | **Two database engines** (PostgreSQL, MySQL) behind one adapter interface, with an honest account of where their behaviour differs. PostgreSQL ships first; MySQL follows in v1.1. |
 
 ### 1.3 Non-goals
 
@@ -63,7 +67,7 @@ Where these two pull in different directions, **audit wins on correctness questi
 |---|---|---|
 | N1 | Being a database or query engine. | The host database plans and executes queries. DataGit rewrites nothing on the `main` read path. |
 | N2 | A SQL wire proxy. | Explicitly rejected — see [§19.1](#191-rejected-a-postgresqlmysql-wire-protocol-proxy). |
-| N3 | Arbitrary SQL against an arbitrary branch. | Served instead by a structured read API plus branch materialization ([§7.5](#75-branch-materialization)). |
+| N3 | Arbitrary SQL against an arbitrary branch. | Served instead by a structured read/write API — single table, typed predicates, predicate updates ([§7.4](#74-the-structured-read-and-write-api)) — plus branch materialization ([§7.5](#75-branch-materialization)). |
 | N4 | Cross-database distributed transactions. | A repository lives in exactly one database instance. |
 | N5 | Replacing backups or PITR. | Different failure classes. Version history does not survive the loss of the database. |
 | N6 | Versioning every table. | Tracking is opt-in per table, and deliberately so. |
@@ -79,17 +83,17 @@ These were settled before design and are treated as constraints, not options.
 |---|---|---|
 | **Interface** | gRPC + REST API with SDKs. No wire proxy, no embedded driver. | DataGit performs writes itself; it never has to parse or rewrite arbitrary SQL. |
 | **Storage** | History lives inside the application's own database. | No content-addressed object store, no prolly trees. Version state is relational, and every design choice is bounded by what one SQL engine can do efficiently. |
-| **Commit model** | Explicit, application-controlled. | A working set (staging area) is required. Commits carry an author, a message, and an optional external reference. |
+| **Commit model** | Explicit, application-controlled. | Every commit is a single atomic RPC carrying its change set. On `main` there is no server-side staging at all; on other branches, optional lease-bound **sessions** hold uncommitted work ([§6](#6-write-path)). Commits carry an author, a message, and an optional external reference. |
 | **Read path** | `main` reads bypass DataGit entirely. | **The single hardest constraint.** The live table must at all times be a clean, unpolluted, schema-unmodified materialization of `main@HEAD`. This eliminates one whole family of designs ([§19.2](#192-rejected-visibility-columns-on-the-live-table)). |
 | **Merge** | Cell-level automatic merge; same-cell divergence surfaced for human resolution. | Requires per-version column-change masks, and rules out storing versions as opaque blobs. |
-| **Engines** | PostgreSQL and MySQL. | Constrains the design to the intersection of both, with adapter-local optimizations behind a shared interface. |
-| **Schema** | Versioned **and** mergeable. | In tension with the bypass read path; resolved by the gated apply step in [§10.4](#104-merging-schema-into-main-the-apply-step). |
+| **Engines** | PostgreSQL and MySQL. | Constrains the design to the intersection of both, with adapter-local optimizations behind a shared interface. **Release phasing:** v1.0 ships PostgreSQL only; MySQL follows in v1.1 ([§20.2](#202-roadmap)). The design accommodates both from the start; the build does not attempt both at once. |
+| **Schema** | Versioned **and** mergeable. | In tension with the bypass read path; resolved by the gated apply step in [§10.4](#104-merging-schema-into-main-the-apply-step). Ships in v1.2; until then the application's migration tool owns DDL and DataGit evolves sidecars additively. |
 | **Language** | Go. | Single static binary, mature `pgx` and `go-sql-driver/mysql` drivers, straightforward gRPC. |
-| **Retention / erasure** | All three mechanisms, combined. | Retention + GC for storage, crypto-shredding as the default erasure path, audited hard purge as the escape hatch. See [§13](#13-retention-garbage-collection-and-erasure). |
+| **Retention / erasure** | All three mechanisms, combined. | Retention + GC for storage, crypto-shredding as the default erasure path, audited hard purge as the escape hatch. See [§13](#13-retention-garbage-collection-and-erasure). Retention, GC, and purge ship in v1.0; crypto-shredding in v1.3. |
 | **Scale** | Mixed, per-table opt-in tiers. | `audit` and `versioned` modes with materially different costs. See [§14](#14-performance-and-scale). |
 | **Deployment** | Stateless Go binary, horizontally scalable, all state in the target database. | No leader election, no local disk, no cache coherence problem. |
 | **Auth** | Single-tenant per deployment. Pluggable OIDC/JWT + API keys. Branch protection rules. | Every commit carries a verified author identity. |
-| **Consistency** | `main` writes commit in the same DB transaction as the live-table update. | Direct readers never observe a state that is not some `main` commit. |
+| **Consistency** | Every `main` commit applies its live-table changes, its version records, and its commit record in one DB transaction. | Direct readers never observe a state that is not some `main` commit. There is no uncommitted state on `main`, ever. |
 | **Non-versioned FKs** | Allowed, with documented caveats. | Referential integrity across the versioned boundary is the application's responsibility. |
 | **Licence** | Apache 2.0. | — |
 
@@ -105,7 +109,7 @@ Repository
 ├── Commit           (immutable; hash-chained; parents; author; message; change set)
 ├── Branch           (mutable ref → commit; fork point; protection rules)
 ├── Tag              (immutable ref → commit)
-├── WorkingSet       (per branch: uncommitted changes = the staging area)
+├── Session          (per client, per non-main branch: lease-bound uncommitted changes)
 └── Proposal         (branch → branch merge request: diff, comments, approvals, state)
 ```
 
@@ -134,7 +138,7 @@ The commit graph is a DAG. `seq` is *not* a global ordering across branches and 
 | Revert a commit | ✅ | ✅ |
 | Branch, diff, merge | ❌ | ✅ |
 | Requires stable PK | preferred | **required** |
-| Storage at rest | 1× + history | ~2× + history |
+| Storage at rest (data + sidecar indexes, before history) | ~1.5× | ~3–4× |
 | Added p99 write latency (target) | < 2 ms | < 5 ms |
 
 `audit` is the tier for high-volume tables where you want the record but will never branch. `versioned` is the tier for data humans curate.
@@ -155,7 +159,7 @@ flowchart TB
 
     subgraph DG["DataGit service (stateless Go, N replicas)"]
       API["gRPC + REST gateway<br/>authn / authz / branch protection"]
-      WS["Working-set manager"]
+      WS["Session manager<br/>(non-main branches only)"]
       VC["Version-control core<br/>commit · diff · merge · blame"]
       SCH["Schema engine<br/>schema diff · migration planner"]
       GC["Retention · GC · erasure worker"]
@@ -179,7 +183,7 @@ The double line is the point of the architecture. Application read traffic on `m
 
 ### 4.2 Why the service is stateless
 
-All durable state — commits, refs, working sets, versions, proposals — lives in the application's database. Replicas hold no authoritative state, so:
+All durable state — commits, refs, sessions, versions, proposals — lives in the application's database. Replicas hold no authoritative state, so:
 
 - Scale horizontally behind any load balancer; no session affinity.
 - No leader election, no consensus, no local disk.
@@ -221,6 +225,9 @@ The differences that actually matter:
 | Structured values | `jsonb` | `json` | Only used for metadata columns, never for row payloads. |
 | Sequences | `bigserial` / identity | `AUTO_INCREMENT` | Adapter-generated DDL. |
 | Change masks | `bit varying` or `text[]` | `varbinary` | Normalized to a `[]byte` bitmask in Go; `text[]` is a Postgres-only readability optimization. |
+| Optimizer strength on the resolution shape | Strong: `DISTINCT ON` over a `UNION ALL` of index range scans plans well | **Expected to lag.** Derived tables combined with window functions are a known weak spot in MySQL's planner. | S1 in PLAN.md measures both. A performance gap is not a capability difference and cannot be hidden in this matrix; if MySQL misses its targets, the materialized-branch-head fallback ([§7.6](#76-fallback-materialized-branch-heads)) is enabled for that engine alone. |
+| Partial indexes | Yes | No | The session index ([§5.2](#52-version-sidecars)) is partial on PostgreSQL and a plain index on MySQL. |
+| Column types with no exact typed mirror or canonical encoding | Refused for `versioned` mode at `track` time, naming the column | Same | Explicit supported-type list per engine; rules in [§10.5](#105-sidecar-evolution-rules). |
 
 **Non-goal for the adapter:** hiding real semantic differences. Where an engine cannot do something (MySQL and transactional DDL), the design changes to accommodate the weaker engine rather than pretending.
 
@@ -236,7 +243,7 @@ For every tracked table `T`:
 |---|---|---|
 | **Live** | `T` | The application's own table, schema **unmodified**. Invariant: `T` ≡ `main@HEAD`. |
 | **Versions** | `datagit_v_T` | One row per row-version, typed columns mirroring `T`, valid over a half-open `seq` interval on one branch. |
-| **Control** | `datagit_*` | Repositories, tables, commits, refs, working sets, proposals, keys, journals. Shared, not per-table. |
+| **Control** | `datagit_*` | Repositories, tables, commits, refs, sessions, proposals, keys, journals, idempotency records. Shared, not per-table. |
 
 The live table gets **no added columns, no triggers on the happy path, and no view substitution**. That is what buys goal G2.
 
@@ -252,8 +259,13 @@ CREATE TABLE datagit_v_products (
     seq_from      bigint       NOT NULL,
     seq_to        bigint       NOT NULL DEFAULT 9223372036854775807,  -- open interval
     op            smallint     NOT NULL,          -- 1=insert 2=update 3=delete
-    commit_id     bytea        NOT NULL,          -- 32-byte hash; NULL-equivalent 0x00.. while staged
-    changed_cols  bytea        NOT NULL,          -- bitmask over the schema's column ordinals
+    commit_id     bytea        NOT NULL,          -- 32-byte hash; the zero hash while staged in a session
+    session_id    uuid,                           -- set while staged (non-main branches only); NULL once committed
+    changed_cols  bytea        NOT NULL,          -- bitmask over the schema's stable column ids, §10.5
+
+    -- Mirrored columns. Logical names are shown for readability; the physical
+    -- sidecar column for a live column is named c_<column_id>, so renames, drops,
+    -- and re-adds never collide — see §10.5.
 
     -- mirrored primary key columns, real types, NOT NULL
     sku           text         NOT NULL,
@@ -268,18 +280,19 @@ CREATE TABLE datagit_v_products (
 CREATE INDEX v_products_resolve  ON datagit_v_products (branch_id, sku, seq_from DESC);
 CREATE INDEX v_products_range    ON datagit_v_products (branch_id, seq_from, seq_to);
 CREATE INDEX v_products_commit   ON datagit_v_products (commit_id);
+CREATE INDEX v_products_session  ON datagit_v_products (session_id) WHERE session_id IS NOT NULL;  -- plain index on MySQL
 ```
 
 Four decisions embedded here, each with a cost:
 
 **(a) Typed mirrored columns, not a JSON blob.**
-JSON payloads would be simpler and immune to schema drift. Typed columns are chosen because branch reads must support real predicates on real indexes, merges must validate real constraints, and diffs must compare typed values with the engine's own equality semantics. The cost is that every schema change must evolve the sidecar too — which the schema engine already has to do, so the marginal cost is low.
+JSON payloads would be simpler and immune to schema drift. Typed columns are chosen because branch reads must support real predicates on real indexes, merges must validate real constraints, and diffs must compare typed values with the engine's own equality semantics. The cost is real and larger than it first looks: every schema change must evolve the sidecar; a type change cannot rewrite history that no longer fits the new type; and some column types have no safe mirror at all. The rules that make this tractable — stable column ids, append-only sidecar columns, refusal for unmirrorable types — are in [§10.5](#105-sidecar-evolution-rules), and they are part of the price of this decision, not an afterthought.
 
 **(b) Full row image per version, not a column-level delta.**
 Reconstructing a row from a delta chain is O(depth), and the depth of a hot row is unbounded. Storing the full image makes every point read O(1). The `changed_cols` bitmask supplies exactly the delta information the merge algorithm needs, at 1 bit per column, without paying delta-chain reconstruction on reads. Space is traded for read simplicity, deliberately.
 
 **(c) Open versions are stored for `main` too, duplicating the live table.**
-The alternative — treating the live table as the implicit open version and storing only superseded ones — halves storage but makes "what was `main` at commit `c`" a query that must reason about rows *absent* from the sidecar, and cannot tell a row inserted after `c` from one that has been current since before it without a second shadow index. Duplication is chosen: it makes every historical read a pure sidecar query, with the live table used only by direct readers. This is the ~2× storage cost in [§3.4](#34-tracking-modes), and it is the largest single storage decision in the design. `audit` mode avoids it by storing closed intervals only, since it never needs branch resolution.
+The alternative — treating the live table as the implicit open version and storing only superseded ones — halves storage but makes "what was `main` at commit `c`" a query that must reason about rows *absent* from the sidecar, and cannot tell a row inserted after `c` from one that has been current since before it without a second shadow index. Duplication is chosen: it makes every historical read a pure sidecar query, with the live table used only by direct readers. This is the base of the storage cost in [§3.4](#34-tracking-modes): roughly 2× the data, and, once the sidecar's own indexes are counted, 3–4× at rest before any history. It is the largest single storage decision in the design. `audit` mode avoids it by storing closed intervals only, since it never needs branch resolution.
 
 **(d) `seq_to` is an explicit sentinel, not `NULL`.**
 `NULL` in a range predicate defeats index usage on both engines and forces `COALESCE`. A max-`bigint` sentinel keeps `seq_from <= ? AND seq_to > ?` a clean index range scan.
@@ -338,11 +351,24 @@ CREATE TABLE datagit_ref (
     UNIQUE (repo_id, kind, name)
 );
 
-CREATE TABLE datagit_working_set (
-    branch_id     uuid PRIMARY KEY REFERENCES datagit_ref(id),
+CREATE TABLE datagit_session (
+    id            uuid PRIMARY KEY,
+    repo_id       uuid NOT NULL REFERENCES datagit_repo(id),
+    branch_id     uuid NOT NULL REFERENCES datagit_ref(id),   -- never the default branch, §6.1
+    principal     text NOT NULL,
     base_commit   bytea NOT NULL,
-    dirty_tables  uuid[] NOT NULL DEFAULT '{}',
+    state         text NOT NULL,        -- open | committing | committed | abandoned | expired
+    lease_until   timestamptz NOT NULL, -- renewed on activity; reaped by GC once passed
+    created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL
+);
+
+CREATE TABLE datagit_idempotency (
+    key           text PRIMARY KEY,     -- client-supplied, scoped by principal
+    principal     text NOT NULL,
+    request_hash  bytea NOT NULL,       -- reusing a key with a different request is an error
+    response      bytea NOT NULL,       -- serialized original response, replayed on retry
+    expires_at    timestamptz NOT NULL
 );
 
 CREATE TABLE datagit_proposal (
@@ -362,7 +388,7 @@ CREATE TABLE datagit_proposal (
 --       datagit_migration_journal, datagit_dek, datagit_purge_log, datagit_checkpoint
 ```
 
-Uncommitted working-set changes live in the same sidecar with `commit_id` set to the zero hash and `seq_from` set to the branch's next sequence number. Committing is therefore a metadata operation — stamp the rows with the real commit hash — not a data copy. That keeps commit cost proportional to the change, not the table.
+Uncommitted changes exist only inside a session on a non-`main` branch. They live in the same sidecar with `commit_id` set to the zero hash, `session_id` set, and `seq_from` set to the branch's next sequence number. `CommitSession` stamps them with the real hash and clears `session_id` — a metadata operation, not a data copy — so commit cost is proportional to the change, not the table. On `main` there are no staged rows at all: a `Commit` carries its whole change set and applies it in one transaction ([§6.1](#61-writing-to-main)).
 
 ---
 
@@ -370,7 +396,11 @@ Uncommitted working-set changes live in the same sidecar with `commit_id` set to
 
 ### 6.1 Writing to `main`
 
-The critical path. Everything about it is shaped by the invariant `T ≡ main@HEAD`.
+The critical path. Everything about it is shaped by the invariant `T ≡ main@HEAD`, and by one rule that follows from it:
+
+> **There is no uncommitted state on `main`.** A `main` commit is a single RPC carrying its entire change set. The live-table writes, the version records, and the commit record land in one database transaction, or none of them do.
+
+This is a deliberate departure from Git's stage-then-commit model, and it closes the audit gap a server-side staging area would open: a client that crashed between staging and committing would leave live production rows with no author, no message, and no commit — and fifty application instances sharing one staging area would have no way to say whose commit stamps whose rows. The SDK still offers a stage-then-commit *shape* — `Begin`, several writes, `Commit` — but it buffers client-side and sends one `Commit` RPC. Nothing reaches the database until then.
 
 ```mermaid
 sequenceDiagram
@@ -378,34 +408,47 @@ sequenceDiagram
     participant DG as DataGit
     participant DB as Database
 
-    App->>DG: Update(main, products, {sku: TENT-4P}, {price: 268.92})
+    App->>DG: Commit(main, changes=[Update(products,{sku:TENT-4P},{price:268.92}), ...], expected_head, message)
     DG->>DB: BEGIN
-    DG->>DB: SELECT ... FROM products WHERE sku = $1 FOR UPDATE
-    Note over DG: read the current image; compute changed_cols
-    DG->>DB: UPDATE products SET price = $1 WHERE sku = $2
-    DG->>DB: UPDATE datagit_v_products SET seq_to = $seq WHERE branch=main AND sku=$1 AND seq_to = MAX
-    DG->>DB: INSERT INTO datagit_v_products (...) VALUES (...)  -- new open version
+    DG->>DB: acquire ref lock (main); verify head == expected_head
+    loop each change, in primary-key order
+        DG->>DB: SELECT ... FROM products WHERE sku = $1 FOR UPDATE
+        Note over DG: compute changed_cols; check per-row expected_version if supplied
+        DG->>DB: UPDATE products SET price = $1 WHERE sku = $2
+        DG->>DB: UPDATE datagit_v_products SET seq_to = $seq WHERE branch=main AND sku=$1 AND seq_to = MAX
+        DG->>DB: INSERT INTO datagit_v_products (...)  -- new open version, commit_id already stamped
+    end
+    DG->>DB: INSERT INTO datagit_commit (...); UPDATE datagit_ref SET head_commit = ...
     DG->>DB: COMMIT
-    DG-->>App: ok
+    DG-->>App: Commit{id, seq}
 ```
 
-Three properties fall out of doing this in one transaction:
+Properties that fall out of doing this in one transaction:
 
 1. **No skew for direct readers.** A concurrent reader on the live table sees either the pre-state or the post-state, and both are valid `main` commits.
-2. **No lost history.** History cannot be recorded for a write that rolled back, and a write cannot succeed with its history missing. There is no reconciliation job because there is nothing to reconcile.
-3. **`SELECT ... FOR UPDATE` serializes writers per row.** Concurrent writers to the same row queue; writers to different rows do not contend.
+2. **No lost history, no orphaned writes.** History cannot be recorded for a write that rolled back; a write cannot land without its history and its commit. There is no reconciliation job because there is nothing to reconcile.
+3. **Per-row serialization without deadlocks.** `SELECT ... FOR UPDATE` in primary-key order queues concurrent commits touching the same row and guarantees two commits with overlapping key sets acquire locks in the same order.
+4. **Optimistic concurrency at two grains.** `expected_head` protects against the branch having moved since the client read it; an optional per-change `expected_version_id` protects a read-modify-write on one row across the RPC boundary. Either mismatch returns `FAILED_PRECONDITION` carrying the actual value, and nothing is written.
 
-Under an explicit commit model these writes are *staged*: they land in the sidecar with the zero commit hash. `Commit` then stamps them, appends `datagit_commit`, and advances the ref — also in one transaction. Between staging and commit, the live table has already moved. This is intentional and must be documented for users: **on `main`, staged writes are visible to direct readers immediately.** `main` is the place where the world is, not a scratch pad. Work that should be invisible until reviewed belongs on a branch.
+`main` accepts commits only; it does not accept sessions. Long-running, incremental, review-before-publish work belongs on a branch, where sessions exist for exactly that purpose.
 
 ### 6.2 Writing to a non-`main` branch
 
-Strictly simpler, and it never touches the live table:
+Never touches the live table. Two shapes:
 
-1. Resolve the row's current state on the branch ([§7](#7-read-path-and-branch-resolution)).
-2. Close the branch's own open version for that key, if it has one.
-3. Insert a new open version with `branch_id` = this branch.
+**Direct commit** — identical to [§6.1](#61-writing-to-main) minus the live-table writes: one RPC, one transaction, sidecar only. Resolve each row's current state on the branch, close the branch's own open version for that key if it has one, insert the new open version with `branch_id` = this branch and `commit_id` stamped.
 
-Cost is one or two sidecar writes. The live table is untouched, so branch activity cannot affect production read performance, and a runaway branch job cannot degrade `main`.
+**Session** — for work that accumulates over hours or days before it is worth a commit: a curator editing through a UI, an import that validates as it goes, a script that wants to inspect intermediate state.
+
+1. `OpenSession(branch)` records a `datagit_session` row with a lease (default 24 h, renewed on every write, capped at a configurable maximum).
+2. Writes resolve the row's current state *within the session* — the session's own staged rows take priority over the branch ([§7.3](#73-an-arbitrary-branch-at-an-arbitrary-commit)) — then insert a staged version tagged with `session_id` and the zero commit hash.
+3. Staged rows are visible only to reads that name the session. Other readers of the branch never see them.
+4. `CommitSession` stamps the staged rows with the commit hash, clears `session_id`, appends the commit, and advances the ref — one transaction under the ref lock, cost proportional to the change.
+5. `AbandonSession`, or lease expiry, marks the session `abandoned` or `expired`; GC deletes its staged rows. Nothing was ever visible outside the session, so nothing needs undoing.
+
+Two sessions on the same branch are independent until commit. If both commit changes to the same key, the second `CommitSession` fails its `expected_head` check and must re-resolve against the new head — the same optimistic path as any stale commit.
+
+Cost is one or two sidecar writes per change. The live table is untouched, so branch activity cannot affect production read performance, and a runaway branch job cannot degrade `main`.
 
 ### 6.3 Out-of-band writes
 
@@ -419,6 +462,8 @@ The `T ≡ main@HEAD` invariant holds only while writes go through DataGit. Some
 
 `capture` uses the classic trigger-based CDC approach, which fires synchronously on every write and adds latency and write amplification to the source table. That is precisely the cost DataGit's API-first write path avoids on the happy path, so `capture` is offered as a compatibility bridge for tables with legacy writers, not as a recommended steady state.
 
+`guarded` mode's writer marker is a connection-level variable (`SET LOCAL datagit.writer = ...` on PostgreSQL, a user variable on MySQL) that DataGit sets inside its own transactions. It stops accidents, not adversaries: any client with write access can set it. It is a seatbelt, not a lock, and the [§12.2](#122-the-honest-limit) caveat about privileged operators applies here too.
+
 A background **verification scan** (`datagit verify`) samples or fully scans the live table against `main@HEAD` and reports divergence, regardless of mode. It is cheap to run on a replica.
 
 ### 6.4 Enabling tracking on a non-empty table
@@ -428,7 +473,7 @@ A background **verification scan** (`datagit verify`) samples or fully scans the
 1. Record the table, mark `state = 'backfilling'`.
 2. Create the sidecar.
 3. Chunked copy of the live table into the sidecar as the root commit, by primary-key ranges, with a bounded rate limit.
-4. Concurrent DataGit writes during backfill are staged normally and reconciled by sequence.
+4. Concurrent DataGit commits during backfill land normally; the backfill skips any key that already has a version, so a commit and the import never disagree about a row.
 5. Mark `state = 'active'`, write the root commit.
 
 History before this point does not exist and is never fabricated. The root commit is honestly labelled `import`.
@@ -453,7 +498,9 @@ WHERE  branch_id = :main
   AND  op <> 3                       -- exclude deletes
 ```
 
-Index `(branch_id, seq_from, seq_to)` serves it. Cost is proportional to the live row count at commit `c`, and any application predicate pushes down onto the mirrored typed columns.
+Index `(branch_id, seq_from, seq_to)` serves it. Cost is proportional to the live row count at commit `c`, and any application predicate pushes down onto the mirrored typed columns — safely, because on a single branch there is exactly one segment and therefore no lower segment for a filtered-out row to resurface from. That safety does **not** extend to multi-segment reads; see [§7.3](#73-an-arbitrary-branch-at-an-arbitrary-commit).
+
+**Time as an address.** `at` may be a commit id, a `seq`, or a timestamp. A timestamp resolves to the greatest commit on the branch whose `committed_at` is at or before it. That lookup is well-defined because `committed_at` is assigned by the database's own clock inside the ref-locked commit transaction — never by a DataGit replica — so it is monotonic per branch regardless of replica clock skew. `seq`, not time, remains the ordering the storage layer uses.
 
 ### 7.3 An arbitrary branch at an arbitrary commit
 
@@ -495,16 +542,59 @@ MySQL uses `ROW_NUMBER() OVER (PARTITION BY sku ORDER BY prio)` with an outer `W
 
 **Deletes must not fall through.** A `op = 3` tombstone on a high-priority segment wins resolution and is then filtered out, so the row is absent. Filtering `op <> 3` *inside* the union arms instead would be a correctness bug — the inherited row would resurface. This is the most likely place for a subtle mistake in an implementation and is called out for that reason.
 
-### 7.4 The structured read API
+**Filters must not be pushed into the arms either.** Same shape of bug. If a branch changes a row so it no longer matches `category = 'outdoor'`, pushing that predicate into each arm removes the row from the branch's arm, and the parent's still-matching version resurfaces as the winner. A filter is only meaningful against the *resolved* row.
 
-DataGit does not accept arbitrary SQL for branch reads. It exposes:
+Resolving the whole table and then filtering is correct but O(table). The design uses a **two-pass** form that is both correct and proportional to the result:
 
+```sql
+-- Pass 1: candidate keys — any key whose in-interval version matches the filter
+-- in ANY segment. A superset of the answer: it may contain keys whose winning
+-- version does not match.
+WITH cand AS (
+    SELECT DISTINCT sku FROM (
+        SELECT sku FROM datagit_v_products
+          WHERE branch_id = :b0 AND seq_from <= :c0 AND seq_to > :c0 AND category = :f
+        UNION ALL
+        SELECT sku FROM datagit_v_products
+          WHERE branch_id = :b1 AND seq_from <= :c1 AND seq_to > :c1 AND category = :f
+    ) k
+)
+-- Pass 2: fully resolve exactly those keys, then apply the filter to the winner.
+SELECT * FROM (
+    SELECT DISTINCT ON (s.sku) s.*
+    FROM (  SELECT 0 AS prio, v.* FROM datagit_v_products v JOIN cand USING (sku)
+              WHERE v.branch_id = :b0 AND v.seq_from <= :c0 AND v.seq_to > :c0
+            UNION ALL
+            SELECT 1 AS prio, v.* FROM datagit_v_products v JOIN cand USING (sku)
+              WHERE v.branch_id = :b1 AND v.seq_from <= :c1 AND v.seq_to > :c1 ) s
+    ORDER BY s.sku, s.prio
+) r
+WHERE r.op <> 3 AND r.category = :f;
+```
+
+Correctness argument: if a key's resolved row matches the filter, that row came from some segment's arm, where it matched, so the key is in `cand`. Pass 2 evaluates the filter against the true winner and discards the false positives. Cost is proportional to the number of matching versions across the segments, not to the table. Pass 1 uses a per-column index on the filtered column when one exists ([§14.3](#143-optimizations)); without one it is a range scan per segment over the interval index — bounded by segment size, never by table size. Both hazards in this section are standing invariants in the property-test harness, not unit tests.
+
+**Reads inside a session** prepend a segment of priority −1 containing the session's staged rows (`session_id = :s`), so a session sees its own uncommitted work layered over the branch.
+
+**The segment chain is a tree by construction.** A branch has exactly one parent and one fork point, and [§9.6](#96-updating-a-branch-from-its-parent) keeps it that way when a branch absorbs its parent's newer commits. Merge commits record two parents in `datagit_commit` for history and for finding merge bases; resolution never walks the DAG.
+
+### 7.4 The structured read and write API
+
+DataGit does not accept arbitrary SQL. It exposes a bounded surface it can compile safely and index well:
+
+**Reads**
 - `Get(table, pk, at)` — point read.
-- `Scan(table, filter, order, cursor, limit, at)` — filter is a typed predicate tree over real columns (comparison, `IN`, `LIKE`, `IS NULL`, `AND`/`OR`/`NOT`), compiled to parameterized SQL. No string interpolation of user input, ever.
+- `Scan(table, filter, order, cursor, limit, at)` — `filter` is a typed predicate tree over real columns (comparison, `IN`, `LIKE`, `IS NULL`, `AND`/`OR`/`NOT`), compiled to parameterized SQL using the two-pass resolution above. No string interpolation of user input, ever.
 - `Blame(table, pk, columns)` — per-cell attribution.
 - `History(table, pk)` — the version chain for one row.
 
-This is a bounded surface that DataGit can compile safely and index well. It deliberately does not attempt joins, aggregates, or subqueries against a branch.
+**Writes** (inside a `Commit` change set or a session)
+- `Insert(table, row)`, `Update(table, pk, values)`, `Delete(table, pk)` — by primary key.
+- `UpdateWhere(table, filter, assignments)`, `DeleteWhere(table, filter)` — by predicate. The server resolves the matching rows on the branch, evaluates each assignment against the resolved row, and emits one per-key write per match. `assignments` map columns to a small typed expression grammar: constants, column references, arithmetic (`+ - * /`), string concatenation, `COALESCE`, and `CASE`. Nothing else — no subqueries, no joins, no aggregates, no functions beyond that list.
+
+This is what makes the curation loop expressible: "raise every outdoor price by 8%" is one `UpdateWhere`, evaluated on the branch, producing a change set of per-row writes with full `changed_cols` masks. It is not a query engine: every operation is single-table, every predicate is the same filter AST, and the result of `UpdateWhere` is exactly the change set the equivalent list of `Update` calls would have produced.
+
+**The CLI's `sql` subcommand** is sugar over this API, not a SQL passthrough. It parses a deliberately restricted grammar — single-table `INSERT ... VALUES`, `UPDATE ... SET ... WHERE`, `DELETE ... WHERE`, and `SELECT ... FROM one_table WHERE ... ORDER BY ... LIMIT` — into the corresponding RPCs, and rejects anything outside it with an error naming the construct. Joins, subqueries, and aggregates against a branch go through materialization ([§7.5](#75-branch-materialization)).
 
 ### 7.5 Branch materialization
 
@@ -517,6 +607,12 @@ datagit materialize q4-pricing --into schema q4_pricing_20260901
 This runs the resolution query per table into real tables in a new schema, with the branch's schema version and its indexes. The result is an ordinary set of tables any client can query with unrestricted SQL. It is a **copy**, so it costs time and storage proportional to the data, it is a point-in-time snapshot, and it is not writable back into the branch. Materializations are tracked, TTL'd, and garbage-collected.
 
 This is the deliberate escape hatch that lets [§1.3 N3](#13-non-goals) stand. Rather than building a query engine, DataGit hands the problem to the one already present.
+
+### 7.6 Fallback: materialized branch heads
+
+If measurement (S1 in PLAN.md) shows on-the-fly resolution missing its targets on an engine, that engine can enable **materialized branch heads**: a per-branch, per-table relation holding the fully resolved head state, updated incrementally on every branch write and rebuilt on fork-point advance. Branch reads become single-table scans with native predicates. The price is that branch creation becomes O(table) on that engine, sacrificing G4 there, and every branch write pays a second write.
+
+This is a per-engine capability flag, not a global design change, and it is not the default anywhere. It exists so that a MySQL optimizer shortfall does not force the PostgreSQL design to degrade, and so that the answer to "resolution is too slow" is a documented switch rather than a redesign.
 
 ---
 
@@ -540,8 +636,16 @@ Cost is proportional to the number of changes in the range — goal G5 — becau
 `diff(A, B)` is defined against their merge base, so it answers "what would merging do", not "how do these two sets differ":
 
 1. `base := merge_base(A, B)` — lowest common ancestor over the commit DAG ([§9.1](#91-finding-the-merge-base)).
-2. `ΔA := diff(base, A)`, `ΔB := diff(base, B)`, each by [§8.1](#81-two-point-diff-on-one-branch) along its own branch chain.
+2. `ΔA := changes(base → A)`, `ΔB := changes(base → B)`.
 3. Present per table: added / removed / modified counts, then per row, then per cell using `changed_cols`.
+
+`changes(base → X)` is a walk down X's segment chain. Because the chain is a tree ([§7.3](#73-an-arbitrary-branch-at-an-arbitrary-commit)), `base` always lies on it:
+
+- For the segment containing `base`, take the [§8.1](#81-two-point-diff-on-one-branch) interval scan from `base.seq` to that segment's upper bound.
+- For every segment above it, take the interval scan over the segment's whole range.
+- Fold the pieces by primary key, highest segment wins, and compare each surviving version against the base version to compute the effective `changed_cols`.
+
+For a branch merging into its parent, `base` is the branch's fork point ([§9.6](#96-updating-a-branch-from-its-parent) keeps it so), and `ΔA` is simply the branch's overlay — the common case is the cheap case. For two siblings, `base` is the earlier of their fork points on the shared parent, and each Δ is that sibling's overlay plus the parent's interval between the two fork points.
 
 ### 8.3 Output granularity
 
@@ -643,6 +747,30 @@ One transaction:
 
 At the moment of commit, every direct reader of the live table moves from one valid `main` commit to the next, atomically. There is no window in which the live table shows a half-merged state.
 
+**Large merges.** A single transaction is the right default and the wrong tool past a size. A change set of a million rows applied in one transaction holds a million row locks on a production table, generates a proportionate WAL or binlog burst, and stalls replicas behind it. So `Merge` enforces a per-repository **atomic apply limit** (default 50 000 changed rows). Above it, the merge is refused with `MERGE_TOO_LARGE` unless the caller opts into **chunked apply**, which:
+
+1. Marks the ref `merge_in_progress` with the proposal id, so `verify --drift` and anyone reading `datagit_ref` knows the live table is mid-transition.
+2. Applies the change set in primary-key-ordered chunks, each its own transaction under the ref lock, journalled so a crash resumes rather than restarts.
+3. Writes the merge commit and clears the flag only after the last chunk.
+
+During a chunked apply, direct readers can observe a state that is *not* a commit — a partial merge. That is a real relaxation of the [§11.1](#111-guarantees) guarantee. It is opt-in, it is visible on the ref, and it is bounded: every intermediate state is "old state for keys not yet applied, new state for keys already applied", never anything else. A curation restatement large enough to need it should be planned as a change window, the same way a large migration would be.
+
+### 9.6 Updating a branch from its parent
+
+Branch protection can require a source branch to be up to date with its target ([§15.3](#153-authorization)), and any long-lived branch will want its parent's newer commits regardless. In Git this is `merge main` or `rebase`. DataGit provides `UpdateFromParent(branch)`, which is a three-way merge with the branch as the *target* and the parent's head as the *source*, followed by one bookkeeping step that keeps the segment chain a tree:
+
+1. `base := branch.fork_commit`; `source := parent@HEAD`.
+2. Run [§9.2](#92-the-algorithm) with ours = the branch's overlay, theirs = the parent's changes from `base` to `source`. Conflicts are surfaced and resolved exactly as in a forward merge.
+3. Write the merged result into the branch's overlay as a merge commit with parents `(branch@HEAD, source)`.
+4. **Advance the fork point**: `branch.fork_commit := source`.
+5. Drop overlay rows that are now byte-identical to the parent's version at `source`. They carried no information beyond "same as parent", and removing them keeps the overlay minimal. This step is an optimization and may run lazily.
+
+After step 4, resolution for the branch falls through to the parent at `source`, which is exactly the state the merge just reconciled against. The branch's history records the merge commit with two parents, so `merge_base` and `log` see the DAG; resolution, diff, and the next merge see a tree with a fresh fork point.
+
+The cost must be stated: step 2 reads, and step 3 may write, the parent's entire delta since the old fork point into the branch's overlay. A branch that lags a busy parent by months pays for months of the parent's churn to catch up. That is the same cost Git pays in the same situation for the same reason, and the mitigation is the same: update often.
+
+Rebase — replaying the branch's commits on top of the parent instead of merging — is not offered. It rewrites the branch's commit hashes, which the audit use case forbids.
+
 ---
 
 ## 10. Schema versioning and merge
@@ -704,6 +832,20 @@ Operations are classified:
 
 While a migration is applying, writes to the affected table are held (not failed) behind the ref lock, up to a configurable timeout.
 
+### 10.5 Sidecar evolution rules
+
+Typed sidecar columns ([§5.2a](#52-version-sidecars)) must survive every schema operation without losing history. Five rules make that tractable:
+
+1. **Stable column ids.** Every live-table column gets an immutable id at track time or at `AddColumn`. The sidecar's physical column for it is `c_<id>`. Renames are metadata-only — nothing in the sidecar changes. Drop-then-re-add with the same name yields a new id and a new sidecar column; the old one keeps its history.
+2. **Sidecar columns are append-only.** A sidecar column is never dropped while any retained version references its id. `DropColumn` on the live table marks the id dropped in the schema version; historical projection ([§10.1](#101-schema-as-a-versioned-object)) hides it at commits where it did not exist and shows it where it did. Physical removal happens only once retention has pruned every version that used it.
+3. **Widening alters in place; anything else forks.** `int → bigint`, `varchar(50) → varchar(200)`, and `NOT NULL → NULL` alter the sidecar column directly — every stored value still fits. A narrowing or incompatible change (`bigint → int`, `text → integer`, `numeric(12,2) → numeric(8,2)`) allocates a new column id: new writes go to the new sidecar column, old versions stay in the old one, and projection reads whichever the version's `schema_epoch` names. History is never coerced through a lossy cast.
+4. **Generated columns.** Stored generated columns are mirrored as plain columns — the value is readable, and history wants it. Virtual generated columns are excluded from the sidecar and recomputed by the engine on materialization.
+5. **Unmirrorable types are refused, not approximated.** A column whose type has no exact typed mirror and no canonical encoding for hashing — extension types such as PostGIS geometry without a canonical form, engine-specific types, MySQL `ENUM`/`SET` whose value lists could diverge between branches — makes the table ineligible for `versioned` mode; `track` fails naming the column and the reason. `audit` mode may store such a column as canonical text where the engine provides a stable textual form. The supported-type list is explicit in the [§4.3](#43-the-engine-adapter) capability matrix, per engine, and grows deliberately.
+
+Rule 3 has a consequence for `changed_cols`: the bitmask is over column *ids*, not ordinals, and it only grows. The mask width is recorded with the schema version; comparing masks across epochs zero-extends the shorter one.
+
+**Before v1.2** (when schema versioning ships, [§20.2](#202-roadmap)), the application's own migration tool owns DDL. DataGit re-introspects tracked tables on every request that touches them, evolves sidecars for *additive and widening* changes automatically under rules 1–3, and returns `SCHEMA_DRIFT` for anything else — at which point the table must be untracked and re-tracked, which loses no live data but starts history afresh. That is an honest v1.0 limitation, stated rather than hidden.
+
 ---
 
 ## 11. Consistency and transaction semantics
@@ -712,10 +854,11 @@ While a migration is applying, writes to the affected table are held (not failed
 
 | Guarantee | Scope |
 |---|---|
-| A write to `main` and its version record commit atomically. | Always. |
-| A direct reader of the live table sees only states that are valid `main` commits. | Always, at the database's own isolation level. |
+| A `main` commit's live-table changes, version records, and commit record are written atomically. | Always. |
+| There is no uncommitted state on `main`. | Always. Sessions exist only on other branches ([§6.1](#61-writing-to-main)). |
+| A direct reader of the live table sees only states that are valid `main` commits. | Always, at the database's own isolation level — except during an opted-in chunked merge apply, below. |
 | A commit is atomic — all of its changes become visible together, or none do. | Always. |
-| A merge into `main` is atomic. | Always. |
+| A merge into `main` is atomic. | Always below the atomic apply limit; relaxed, visibly and opt-in only, for chunked apply ([§9.5](#95-applying-a-merge-into-main)). |
 | Non-`main` branch state is visible only through DataGit. | By construction. |
 | Reads through DataGit are at the isolation level of the underlying database. | Default `READ COMMITTED`; `REPEATABLE READ` available per request. |
 
@@ -724,7 +867,7 @@ While a migration is applying, writes to the affected table are held (not failed
 - **No cross-repository atomicity.** A repository is one database.
 - **No atomicity between a DataGit write and an application write issued outside DataGit** in a different transaction.
 - **Replica reads are as stale as the replica.** DataGit will route historical and branch reads to a read replica when configured, and says so.
-- **Staged writes on `main` are visible immediately to direct readers** ([§6.1](#61-writing-to-main)).
+- **During an opted-in chunked merge apply**, direct readers may observe a partial merge ([§9.5](#95-applying-a-merge-into-main)). The ref carries a visible `merge_in_progress` flag for the duration.
 
 ### 11.3 Concurrency control
 
@@ -732,6 +875,7 @@ While a migration is applying, writes to the affected table are held (not failed
 |---|---|
 | Two writers, same row, same branch | `SELECT ... FOR UPDATE` on the live row (`main`) or the open sidecar version (branch). |
 | Two commits, same branch | Advisory lock on the ref, held for the commit transaction. Serializes `seq` assignment. |
+| Two sessions, same branch, same key | Independent until commit; staged rows are session-private. The second `CommitSession` fails its `expected_head` check and re-resolves. |
 | Two merges into the same branch | Same ref lock. The second re-validates against the moved head. |
 | Merge vs. concurrent write to `main` | Ref lock; the writer waits. Merge apply is short because the change set is already computed. |
 | Migration apply vs. writes | Ref lock plus a table-level guard; writers wait up to a timeout, then fail with a retryable error. |
@@ -793,10 +937,10 @@ The mechanism that resolves the GDPR-Article-17-versus-immutable-history tension
 
 - Columns are declared as PII and associated with a **data subject** (typically a customer id resolvable from the row).
 - Each subject gets a **data encryption key (DEK)**, envelope-encrypted under a KMS key and stored in `datagit_dek`.
-- PII column values are encrypted with the subject's DEK at write time, in both the live table and the sidecar.
-- **Erasure = destroying the DEK.** The key material is nulled, a keyref tombstone survives, and every ciphertext for that subject — across every commit, every branch, every backup, and every replica — becomes indistinguishable from random bytes, simultaneously and without touching a single history row.
+- PII column values are encrypted with the subject's DEK **in the sidecar only**. The live table stays plaintext, because direct readers on `main` must keep working without a key and without DataGit ([§2](#2-requirements-and-fixed-decisions)). Encrypting the live table would put DataGit back on the read path for exactly the columns applications most need to read.
+- **Erasure is two steps in one operation.** (1) The subject's *current* rows in the live table are deleted or anonymized by an ordinary commit on `main` — that is what an erasure request means for current state, and it is the same kind of write as any other. (2) The subject's DEK is destroyed: key material nulled, keyref tombstone kept. Every historical ciphertext for that subject — across every commit, branch, backup, and replica — becomes indistinguishable from random bytes, without touching a history row. The version that the deletion commit itself writes to the sidecar is encrypted under the same DEK, so it is shredded with the rest.
 
-Because no history row is modified, **the hash chain stays valid** and the audit trail remains verifiable. The erasure itself is recorded as an immutable erasure-fact commit: who requested it, who executed it, when, and for which subject.
+Because no history row is modified, **the hash chain stays valid** and the audit trail remains verifiable. Historical reads and blame for an erased subject return an `erased` marker in place of the value, not a decryption error. The erasure itself is recorded as an immutable erasure-fact commit: who requested it, who executed it, when, and for which subject.
 
 The costs are real and must be stated:
 
@@ -840,6 +984,8 @@ Uniform targets would be dishonest: the two use cases have different shapes. The
 
 Rationale: `versioned` mode's costs are dominated by the resolution query and merge validation, which are correctness-critical and hard to make fast on arbitrary data — so it targets curated datasets, where "50 million rows" is generous. `audit` mode is a single append per write and scales with partitioning. Forcing one target across both would either cripple curation features or make audit unaffordable on hot tables.
 
+These targets are for PostgreSQL. MySQL is expected to trail on branch reads ([§4.3](#43-the-engine-adapter)); its targets are set after S1 measures it, not assumed, and the [§7.6](#76-fallback-materialized-branch-heads) fallback exists for the case where it trails too far.
+
 ### 14.2 Where the cost is
 
 | Operation | Cost | Bounded by |
@@ -851,20 +997,20 @@ Rationale: `versioned` mode's costs are dominated by the resolution query and me
 | Diff | index range scan | size of the change |
 | Merge | diff + validation + apply | size of the change × constraint count |
 | Materialization | full table copy | size of the data — the honest, stated cost of the escape hatch |
-| Storage, `versioned` | ~2× base + full history | retention policy |
-| Storage, `audit` | 1× base + full history | retention policy |
+| Storage, `versioned` | ~2× data + four sidecar indexes ≈ 3–4× base, + full history | retention policy |
+| Storage, `audit` | ~1.5× base (closed intervals + indexes) + full history | retention policy |
 
 ### 14.3 Optimizations
 
 - **Partition sidecars** by `(branch_id, seq_from)` range on both engines. Dropping a pruned partition beats deleting rows by orders of magnitude.
-- **Index only what resolution needs.** The three indexes in [§5.2](#52-version-sidecars) are the required set; additional indexes on mirrored value columns are opt-in per column, because each one is paid on every write.
+- **Index only what resolution needs.** The four indexes in [§5.2](#52-version-sidecars) are the required set. Additional indexes on mirrored value columns are opt-in per column: they turn pass 1 of a filtered branch read ([§7.3](#73-an-arbitrary-branch-at-an-arbitrary-commit)) into an index lookup instead of a segment scan, and each one is paid on every write.
 - **Batch writes.** The SDK's transaction object buffers changes and issues multi-row statements, amortizing round trips.
 - **Route historical reads to replicas** when configured; they never need write consistency.
 - **Prepared statement cache** keyed by `(table, schema_epoch, segment_count)`, since resolution query shapes are highly repetitive.
 
 ### 14.4 A candid optimization we are not taking
 
-A content-addressed prolly-tree store would give O(diff) diffs by subtree-hash comparison, near-free structural sharing, and cheap sync between instances — which is why Dolt is built that way. It is unavailable here: the fixed decision is that data lives in the application's own SQL database, and prolly trees require owning the storage engine. The interval-plus-index design achieves comparable *asymptotics* for diff, at the cost of higher constants, ~2× storage on `versioned` tables, and no structural sharing between branches. That is the price of not making the user migrate their data, and it is worth naming rather than glossing.
+A content-addressed prolly-tree store would give O(diff) diffs by subtree-hash comparison, near-free structural sharing, and cheap sync between instances — which is why Dolt is built that way. It is unavailable here: the fixed decision is that data lives in the application's own SQL database, and prolly trees require owning the storage engine. The interval-plus-index design achieves comparable *asymptotics* for diff, at the cost of higher constants, 3–4× storage at rest on `versioned` tables, and no structural sharing between branches. That is the price of not making the user migrate their data, and it is worth naming rather than glossing.
 
 ---
 
@@ -890,7 +1036,7 @@ Role-based, at repository and branch granularity:
 | Capability | Meaning |
 |---|---|
 | `read` | Read any branch, any commit, diffs, blame. |
-| `write` | Stage changes and commit on unprotected branches. |
+| `write` | Commit, and open sessions, on unprotected branches. |
 | `branch` | Create and delete branches. |
 | `merge` | Merge into unprotected branches. |
 | `approve` | Approve a proposal. |
@@ -923,23 +1069,31 @@ service Repository {
   rpc GetStatus(...)       returns (RepoStatus);
 }
 
-service Data {                                       // the write path
-  rpc Insert(...)          returns (WriteResult);
-  rpc Update(...)          returns (WriteResult);
-  rpc Delete(...)          returns (WriteResult);
-  rpc BatchWrite(stream WriteOp) returns (WriteResult);
+service Data {                                       // reads; §7.4
   rpc Get(...)             returns (Row);
-  rpc Scan(...)            returns (stream Row);     // typed filter AST, §7.4
+  rpc Scan(...)            returns (stream Row);     // typed filter AST; two-pass resolution, §7.3
 }
 
 service Version {
-  rpc Commit(...)          returns (Commit);
+  rpc Commit(...)          returns (Commit);         // THE write path on main, and direct commits on
+                                                     // branches: carries the full change set —
+                                                     // Insert/Update/Delete by PK, UpdateWhere/
+                                                     // DeleteWhere by filter (§7.4) — plus
+                                                     // expected_head and optional per-row versions
   rpc Log(...)             returns (stream Commit);
   rpc Diff(...)            returns (stream Change);
   rpc Blame(...)           returns (stream CellBlame);
   rpc History(...)         returns (stream RowVersion);
   rpc Revert(...)          returns (Commit);         // a new commit that undoes; erases nothing
-  rpc Status(...)          returns (WorkingSet);
+}
+
+service Session {                                    // non-main branches only; §6.2
+  rpc OpenSession(...)     returns (Session);
+  rpc Write(stream WriteOp) returns (WriteResult);   // staged; visible only to this session
+  rpc RenewLease(...)      returns (Session);
+  rpc Status(...)          returns (SessionStatus);  // summary of staged changes
+  rpc CommitSession(...)   returns (Commit);
+  rpc AbandonSession(...)  returns (Empty);
 }
 
 service Branching {
@@ -947,6 +1101,7 @@ service Branching {
   rpc DeleteBranch(...)    returns (Empty);
   rpc ListRefs(...)        returns (stream Ref);
   rpc CreateTag(...)       returns (Ref);
+  rpc UpdateFromParent(...) returns (MergeResult);   // §9.6; advances the fork point
   rpc Materialize(...)     returns (Materialization);
   rpc Protect(...)         returns (Ref);
 }
@@ -958,7 +1113,8 @@ service Proposals {
   rpc Approve(...)         returns (Review);
   rpc ListConflicts(...)   returns (stream Conflict);
   rpc ResolveConflict(...) returns (Conflict);
-  rpc Merge(...)           returns (MergeResult);    // may return a MigrationPlan, §10.4
+  rpc Merge(...)           returns (MergeResult);    // may return a MigrationPlan (§10.4) or
+                                                     // MERGE_TOO_LARGE unless chunked=true (§9.5)
 }
 
 service Schema {
@@ -975,13 +1131,14 @@ service Admin {
   rpc Purge(...)           returns (PurgeReceipt);   // requires the `purge` capability
   rpc EraseSubject(...)    returns (ErasureReceipt); // crypto-shred, §13.3
   rpc Verify(...)          returns (stream VerifyFinding);
+  rpc Export(...)          returns (stream ExportChunk);   // portable history, §17.5
 }
 ```
 
 ### 16.2 Conventions
 
 - **Idempotency keys** on every mutating call, so a client retry after a network failure cannot double-apply a write.
-- **Optimistic concurrency:** `Commit` takes the expected head; a mismatch returns `FAILED_PRECONDITION` with the actual head.
+- **Optimistic concurrency:** `Commit` and `CommitSession` take the expected head, and each change may carry the version id it was read at; a mismatch at either grain returns `FAILED_PRECONDITION` with the actual value and writes nothing ([§6.1](#61-writing-to-main)).
 - **Streaming** for anything unbounded — diffs, scans, log, migration progress.
 - **Errors** are typed and machine-actionable: `CONFLICT` carries the conflict list, `MIGRATION_REQUIRED` carries the plan, `SCHEMA_DRIFT` carries the observed difference.
 
@@ -1014,6 +1171,16 @@ Configuration by file or environment: database DSN, auth provider, KMS endpoint,
 
 DataGit adds no backup requirement, because its state is in the database that is already backed up. It adds one *restore* requirement worth stating: a restore to a past point in time restores both the data and its history to that point, so commits made after the restore point are gone. History is not a backup, and a backup is not history.
 
+### 17.5 Untracking and leaving
+
+Adopting DataGit must not be a one-way door. `UntrackTable` (`datagit untrack`):
+
+1. Refuses while any non-`main` branch has unmerged changes to the table, naming them — leaving must not silently discard work.
+2. Optionally runs `Export` first: the table's full history, schema versions, and commit metadata as newline-delimited JSON in the canonical encoding, so it can be archived, audited offline, or re-imported later.
+3. Drops the sidecar and the table's control rows.
+
+The live table is untouched at every step, because it was never modified. An application that stops calling DataGit and reverts to direct writes is fully functional the moment it does so; what it loses is history going forward, not data. `datagit repo destroy` does the same for every table and then removes the control tables.
+
 ---
 
 ## 18. Failure modes
@@ -1027,7 +1194,13 @@ DataGit adds no backup requirement, because its state is in the database that is
 | Merge apply fails on a database constraint | Transaction rolls back atomically; the proposal becomes `conflicted` with the engine's error attached. | Pre-validation catches most cases; the FK-to-non-versioned gap remains ([§9.3](#93-constraint-validation)). |
 | Migration crashes mid-apply on MySQL | Resumes from the journal on restart. | Journalled, idempotent operation state machine. |
 | Multiple merge bases | Merge refused with the candidates named. | Explicit error; recursive base merge deferred. |
-| Resolution segment depth exceeds 8 | Branch creation refused. | Hard cap; merge or rebase the chain. |
+| Resolution segment depth exceeds 8 | Branch creation refused. | Hard cap; merge the chain down. |
+| Session abandoned, or client crashes mid-session | Staged rows were visible only to that session. Lease expires; GC deletes them. Nothing reached `main`. | Lease-bound sessions ([§6.2](#62-writing-to-a-non-main-branch)). |
+| Merge larger than the atomic apply limit | Refused with `MERGE_TOO_LARGE`. | Opt-in chunked apply with a visible in-progress flag ([§9.5](#95-applying-a-merge-into-main)). |
+| Chunked apply crashes mid-way | Resumes from the journal; the ref stays flagged until complete. | Journalled chunks. |
+| Table has an unmirrorable column type | `track` refused for `versioned` mode, naming the column. | Explicit supported-type list ([§10.5](#105-sidecar-evolution-rules)). |
+| Out-of-band non-additive DDL before v1.2 | `SCHEMA_DRIFT`; the table must be untracked and re-tracked. | Stated v1.0 limitation ([§10.5](#105-sidecar-evolution-rules)). |
+| Branch far behind a busy parent | `UpdateFromParent` pays for the parent's whole delta since the fork point. | Documented cost ([§9.6](#96-updating-a-branch-from-its-parent)); update often. |
 | Sidecar interval corruption | `verify` reports overlapping or missing intervals. | Detection only. Repair is a manual, audited operation. |
 | DEK lost, not erased | Data is unrecoverable and indistinguishable from an erasure. | KMS-backed keys with the KMS's own durability guarantees. |
 | Clock skew across replicas | Timestamps are advisory. Ordering comes from `seq`, not from time. | Never order by wall clock. |
@@ -1095,26 +1268,31 @@ DataGit adds no backup requirement, because its state is in the database that is
 
 ### 20.2 Roadmap
 
-**v0.1 — foundation**
-Repository and table tracking with online backfill · sidecars and control tables · PostgreSQL adapter · write path with atomic history · explicit commits · time travel and blame · `log` and two-point `diff` · CLI.
+The design covers everything in [§2](#2-requirements-and-fixed-decisions). The build ships it in slices, narrowest first, so that the riskiest pieces — resolution and merge — reach real use before the surface area widens. **v1.0 is PostgreSQL-only and does not include schema merge or crypto-shredding.** Both are designed in; neither is on the path to the first production release.
 
-**v0.2 — branching**
-Branches and tags · branch resolution · cross-branch diff · materialization · MySQL adapter.
+**v0.1 — foundation** (PostgreSQL)
+Repository and table tracking with online backfill · sidecars and control tables · atomic single-RPC commits on `main` · time travel and blame · `log` and two-point `diff` · revert · drift detection · additive sidecar evolution and `SCHEMA_DRIFT` · untrack and export · CLI and Go SDK.
 
-**v0.3 — merge**
-Merge base · cell-level three-way merge · conflict persistence and resolution · constraint validation · proposals with comments and approvals · branch protection.
+**v0.2 — branching** (PostgreSQL)
+Branches and tags · two-pass resolution · sessions on branches · predicate writes · cross-branch diff · `UpdateFromParent` with fork-point advance · materialization.
 
-**v0.4 — schema**
-Schema versioning · schema diff and merge · migration planner and resumable apply · historical schema projection.
+**v0.3 — merge** (PostgreSQL)
+Merge base · cell-level three-way merge · conflict persistence and resolution · constraint validation · atomic and chunked apply · proposals with comments and approvals · branch protection and RBAC.
 
-**v0.5 — compliance**
-Retention policies and GC · crypto-shredding · hard purge with tombstones · hash chain and external anchoring · `verify` in all three modes.
+**v1.0 — production** (PostgreSQL)
+Retention policies and GC · hard purge with tombstones · `verify` in all three modes · partitioning · performance against measured targets · trigger modes · observability · OIDC · Helm chart · documentation. Schema changes are handled by the application's existing migration tool; non-additive changes require untrack and re-track.
 
-**v1.0 — production**
-Performance work against the [§14.1](#141-recommended-target-mixed-per-table-opt-in) targets · partitioning · observability · Helm chart · SDKs for Go, TypeScript, and Python · documentation.
+**v1.1 — MySQL**
+MySQL adapter at full parity for everything in v1.0 · engine capability matrix populated from measurement · materialized branch heads ([§7.6](#76-fallback-materialized-branch-heads)) if measurement requires it.
 
-**Post-v1**
-Review UI · rebase and cherry-pick · bitemporality · push/pull between instances · multi-tenancy.
+**v1.2 — schema**
+Schema versioning · historical projection · schema diff and merge · migration planner · resumable journalled apply on both engines · full sidecar evolution rules including narrowing forks.
+
+**v1.3 — compliance**
+Crypto-shredding with KMS envelope · external anchoring · commit signing · TypeScript and Python SDKs.
+
+**Post-v1.3**
+Review UI · cherry-pick · bitemporality · push/pull between instances · multi-tenancy.
 
 ---
 
@@ -1133,4 +1311,4 @@ Review UI · rebase and cherry-pick · bitemporality · push/pull between instan
 
 ## Appendix B — Glossary
 
-**Apply** — executing a merged schema change against the live table as a migration. **Blame** — per-cell attribution of the last change. **Change set** — the rows and schema operations a commit contains. **Fork point** — the parent-branch commit a branch diverged from. **Live table** — the application's own table; always `main@HEAD`. **Materialization** — a real schema containing a branch's state as ordinary tables. **Merge base** — the lowest common ancestor of two commits. **Proposal** — a reviewable merge request. **Resolution** — computing a branch's state by priority-ordered fallthrough. **Segment chain** — the ordered `(branch, seq)` list resolution walks. **Sidecar** — the per-table version store. **`seq`** — a branch-local monotonic commit sequence. **Tracking mode** — `audit` or `versioned`. **Working set** — uncommitted changes on a branch.
+**Apply** — executing a merged schema change against the live table as a migration. **Blame** — per-cell attribution of the last change. **Change set** — the rows and schema operations a commit contains. **Fork point** — the parent-branch commit a branch's overlay is relative to; advanced by `UpdateFromParent`. **Live table** — the application's own table; always `main@HEAD`. **Materialization** — a real schema containing a branch's state as ordinary tables. **Merge base** — the lowest common ancestor of two commits. **Proposal** — a reviewable merge request. **Resolution** — computing a branch's state by priority-ordered fallthrough. **Segment chain** — the ordered `(branch, seq)` list resolution walks. **Sidecar** — the per-table version store. **`seq`** — a branch-local monotonic commit sequence. **Session** — a lease-bound container for uncommitted changes on a non-`main` branch, visible only to its holder. **Tracking mode** — `audit` or `versioned`.
