@@ -1,6 +1,6 @@
 [project]
 name = "datagit-sdk"
-version = "0.0.0"
+version = "0.1.0"
 description = "DataGit's Python SDK: Git-style version control for rows in your own database"
 readme = "README.md"
 requires-python = ">=3.9"
