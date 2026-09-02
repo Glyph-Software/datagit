@@ -316,6 +316,13 @@ type CommitRequest struct {
 	Message      string
 	ExternalRef  string
 	ExpectedHead *hash.Digest // optimistic concurrency; nil to skip
+
+	// ExtraParents adds parents beyond the branch head, for merge commits.
+	// They are folded into the commit HASH, not merely recorded afterwards:
+	// otherwise recomputing the chain fails on every merge, and
+	// `verify --integrity` would be useless exactly where history is most
+	// complex.
+	ExtraParents []hash.Digest
 }
 
 type CommitResult struct {
@@ -414,8 +421,9 @@ func (s *Store) Commit(ctx context.Context, req CommitRequest) (*CommitResult, e
 			return err
 		}
 		sd := schemaDigest(req.Table)
+		parents := append([]hash.Digest{headCommit}, req.ExtraParents...)
 		id := hash.CommitID(hash.CommitInput{
-			RepoID: req.Repo.ID, Parents: []hash.Digest{headCommit},
+			RepoID: req.Repo.ID, Parents: parents,
 			ChangeDigest: cd, SchemaDigest: sd,
 			Author: req.Author, AuthorAt: now,
 			Message: req.Message, ExternalRef: req.ExternalRef,
@@ -430,7 +438,7 @@ func (s *Store) Commit(ctx context.Context, req CommitRequest) (*CommitResult, e
 
 		newChain := append([]adapter.Segment{{BranchID: branchID, Seq: newSeq}}, chain[1:]...)
 		if err := insertCommit(ctx, tx, req.Repo.ID, branchID, newSeq, id,
-			[]hash.Digest{headCommit}, req.Author, now, req.Message, req.ExternalRef,
+			parents, req.Author, now, req.Message, req.ExternalRef,
 			cd, sd, newChain); err != nil {
 			return err
 		}

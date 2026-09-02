@@ -127,9 +127,12 @@ func (s *Store) Merge(ctx context.Context, repo *Repo, t *Table, from, into, aut
 		message = fmt.Sprintf("Merge %s into %s", from, into)
 	}
 	// The merge commit records BOTH parents, so the DAG stays honest even though
-	// resolution walks only the chain (§7.3).
-	cr, err := s.commitWithParents(ctx, repo, t, into,
-		[]hash.Digest{intoHead, fromHead}, res.Changes, author, message, "")
+	// resolution walks only the chain (§7.3). The second parent is part of the
+	// commit HASH, so the chain still verifies across merges.
+	cr, err := s.Commit(ctx, CommitRequest{
+		Repo: repo, Table: t, Branch: into, Changes: res.Changes,
+		Author: author, Message: message, ExtraParents: []hash.Digest{fromHead},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -437,37 +440,6 @@ func (s *Store) UpdateFromParent(ctx context.Context, repo *Repo, t *Table,
 		return tx.Exec(ctx,
 			`UPDATE datagit_ref SET fork_commit=$1, fork_seq=$2, chain=$3 WHERE id=$4`,
 			parentHead[:], parentSeq, mustJSON(newChain), branchID)
-	})
-	return res, err
-}
-
-// commitWithParents is Commit with an explicit parent list, for merge commits.
-func (s *Store) commitWithParents(ctx context.Context, repo *Repo, t *Table, branch string,
-	parents []hash.Digest, changes []Change, author, message, ref string) (*CommitResult, error) {
-	if len(parents) < 2 {
-		return s.Commit(ctx, CommitRequest{
-			Repo: repo, Table: t, Branch: branch, Changes: changes,
-			Author: author, Message: message, ExternalRef: ref,
-		})
-	}
-	res, err := s.Commit(ctx, CommitRequest{
-		Repo: repo, Table: t, Branch: branch, Changes: changes,
-		Author: author, Message: message, ExternalRef: ref,
-	})
-	if err != nil {
-		return nil, err
-	}
-	// Record the second parent. The commit id was computed over one parent, so
-	// this is a deliberate simplification for M3: the DAG is correct for merge
-	// base finding, and M3.4 will fold both parents into the hash before the
-	// milestone closes.
-	err = s.pool.InTx(ctx, func(tx adapter.Tx) error {
-		ps := make([][]byte, 0, len(parents))
-		for _, p := range parents {
-			pp := p
-			ps = append(ps, pp[:])
-		}
-		return tx.Exec(ctx, `UPDATE datagit_commit SET parent_ids=$1 WHERE id=$2`, ps, res.ID[:])
 	})
 	return res, err
 }

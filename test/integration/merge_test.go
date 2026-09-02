@@ -324,3 +324,18 @@ func TestConflictsArePersisted(t *testing.T) {
 		t.Errorf("persisted %d conflicts, computed %d", n, len(res.Conflicts))
 	}
 }
+
+// TestMergeCommitVerifies: a merge commit's id must be computed over BOTH
+// parents, or recomputing the chain fails on every merge — which would make
+// `verify --integrity` useless precisely where history is most complex.
+func TestMergeCommitVerifies(t *testing.T) {
+	f := setup(t)
+	f.branchWith(t, "feature", "MUG-01", "kitchen", "15.00")
+	if _, err := f.store.Merge(f.ctx, f.repo, f.table, "feature", store.DefaultBranch,
+		principal, "merge feature", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.VerifyIntegrity(f.ctx, f.repo, store.DefaultBranch); err != nil {
+		t.Errorf("hash chain does not verify after a merge: %v", err)
+	}
+}
