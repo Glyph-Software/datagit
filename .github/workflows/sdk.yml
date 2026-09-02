@@ -45,6 +45,21 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
+      # TypeScript ships its compiler as per-platform native packages, and npm
+      # can prune the ones that do not match the machine that last wrote the
+      # lockfile. When that happens `npm ci` still succeeds and `tsc` dies with
+      # "Unable to resolve @typescript/typescript-linux-x64", which reads like a
+      # broken runner rather than a stale lockfile. Say so plainly instead.
+      - name: The lockfile must cover this platform
+        run: |
+          if ! grep -q '@typescript/typescript-linux-x64' package-lock.json; then
+            echo "package-lock.json has no linux-x64 TypeScript binary, so tsc cannot run here."
+            echo "It was probably written by an incremental install on another platform."
+            echo "Regenerate it from scratch and commit the result:"
+            echo
+            echo "    rm -rf node_modules sdk/typescript/node_modules package-lock.json && npm install"
+            exit 1
+          fi
       - name: Typecheck and test
         run: npm run test:sdk
 
