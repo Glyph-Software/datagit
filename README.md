@@ -186,9 +186,13 @@ make db-up                      # PostgreSQL 16/17 and MySQL 8.4 in Docker
 make build                      # bin/datagit and bin/datagitd
 export DATAGIT_DSN="postgres://datagit:datagit@localhost:55417/datagit"
 export DATAGIT_AUTHOR="you@example.com"
+export DATAGIT_REPO=catalog
 bin/datagit repo init catalog
-bin/datagit --repo catalog track products
+bin/datagit track products
+bin/datagit status
 ```
+
+Global flags go **after** the subcommand: `datagit track products --repo catalog`.
 
 The same binary talks to MySQL: the engine is detected from the DSN.
 
