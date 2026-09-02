@@ -156,6 +156,14 @@ var widening = map[string][]string{
 	"character":         {"character varying", "text"},
 }
 
+// ClassifyTypeChange reports how risky a type change is, and why.
+//
+// Exported because §10.5 rule 3 turns on it: anything past Widening forks to a
+// new column id rather than altering in place.
+func ClassifyTypeChange(from, to string) (adapter.MigrationClass, string) {
+	return classifyTypeChange(from, to)
+}
+
 func classifyTypeChange(from, to string) (adapter.MigrationClass, string) {
 	f, t := baseType(from), baseType(to)
 	if f == t {
@@ -179,10 +187,47 @@ func classifyTypeChange(from, to string) (adapter.MigrationClass, string) {
 			"through a lossy cast (§10.5 rule 3)", f, t)
 }
 
+// synonyms maps SQL spellings that name the SAME type to one canonical form.
+//
+// This is not an engine difference being papered over: these are standard
+// synonyms, and both engines accept both spellings. It matters because the two
+// engines REPORT different ones -- PostgreSQL introspects numeric(12,2) where
+// MySQL reports decimal(12,2) for the identical declaration -- and treating them
+// as different types would classify a widening as incompatible and fork the
+// column to a new id for nothing (§10.5 rule 3).
+//
+// Only synonyms belong here. A type that merely converts cleanly is a WIDENING
+// and belongs in the table above, where it stays visible as a change.
+var synonyms = map[string]string{
+	"decimal":                     "numeric",
+	"dec":                         "numeric",
+	"fixed":                       "numeric",
+	"int":                         "integer",
+	"int4":                        "integer",
+	"int2":                        "smallint",
+	"int8":                        "bigint",
+	"bool":                        "boolean",
+	"varchar":                     "character varying",
+	"char":                        "character",
+	"float4":                      "real",
+	"float8":                      "double precision",
+	"double":                      "double precision",
+	"timestamptz":                 "timestamp with time zone",
+	"datetime":                    "timestamp",
+	"timestamp without time zone": "timestamp",
+}
+
 func baseType(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if i := strings.IndexByte(s, '('); i >= 0 {
 		s = strings.TrimSpace(s[:i])
+	}
+	// MySQL appends attributes to the reported type: "int unsigned", "bigint
+	// unsigned zerofill". Unsigned is NOT a synonym -- an unsigned bigint holds
+	// values a signed one cannot -- so it is kept as part of the name and a change
+	// in signedness stays a change.
+	if canonical, ok := synonyms[s]; ok {
+		return canonical
 	}
 	return s
 }

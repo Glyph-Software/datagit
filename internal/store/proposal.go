@@ -236,11 +236,27 @@ func (s *Store) MergeProposal(ctx context.Context, repo *Repo, t *Table, id int6
 		}
 	}
 
+	// Schema merges BEFORE data, because the data merge needs to know the shape
+	// it is producing (§10.3).
+	sm, err := s.MergeSchema(ctx, repo, t, p.From, p.Into, id, principal)
+	if err != nil {
+		return nil, err
+	}
+	if len(sm.Conflicts) > 0 {
+		// A shape disagreement blocks the whole merge. Merging the data into a
+		// shape nobody has agreed on would produce rows that fit neither branch.
+		if err := s.setProposalState(ctx, id, "conflicted", hash.Digest{}); err != nil {
+			return nil, err
+		}
+		return &MergeResult{SchemaConflicts: sm.Conflicts}, nil
+	}
+
 	res, err := s.Merge(ctx, repo, t, p.From, p.Into, principal,
 		fmt.Sprintf("Merge proposal #%d: %s", id, p.Title), true)
 	if err != nil {
 		return nil, err
 	}
+	res.PendingMigration = sm.Plan
 
 	if !res.Clean {
 		// Conflicts are persisted so the proposal can be resolved over days, by

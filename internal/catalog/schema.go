@@ -4,7 +4,7 @@ package catalog
 
 // ControlSchemaVersion is the version of the control-plane schema this build
 // understands. Startup refuses to run against a newer one (DESIGN.md §17.2).
-const ControlSchemaVersion = 1
+const ControlSchemaVersion = 2
 
 // ControlSchema is the DESIGN.md §5.3 control schema, with the Phase 0 findings
 // applied. It is written to be idempotent so it runs through the same resumable
@@ -206,6 +206,42 @@ CREATE TABLE IF NOT EXISTS datagit_purge_log (
     reason           text   NOT NULL,
     purged_by        text   NOT NULL,
     purged_at        timestamptz NOT NULL
+);
+
+-- Schema versions (§10.1). A schema is a versioned object like the data, so a
+-- branch can change shape without the live table changing shape with it.
+--
+-- One row per (table, branch, epoch). The branch's CURRENT schema is its highest
+-- epoch; a commit records the epoch in force when it was made, so a historical
+-- read projects through the shape of the world as it was.
+CREATE TABLE IF NOT EXISTS datagit_schema_version (
+    table_id    bigint NOT NULL,
+    branch_id   uuid   NOT NULL,
+    epoch       bigint NOT NULL,
+    columns     text   NOT NULL,      -- JSON: id, name, sql_type, kind, nullable
+    dropped     text   NOT NULL DEFAULT '{}',
+    digest      bytea  NOT NULL,
+    mask_width  integer NOT NULL,
+    created_by  text   NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (table_id, branch_id, epoch)
+);
+
+-- A migration plan produced by a schema merge and awaiting deliberate apply
+-- (§10.4). It is a ROW, not in-memory state: the whole point is that it survives
+-- until someone chooses a moment to run it.
+CREATE TABLE IF NOT EXISTS datagit_migration_plan (
+    id           bigserial PRIMARY KEY,
+    repo_id      uuid   NOT NULL REFERENCES datagit_repo(id) ON DELETE CASCADE,
+    table_id     bigint NOT NULL,
+    proposal_id  bigint,
+    ops          text   NOT NULL,      -- JSON: ordinal, kind, sql, class
+    target_epoch bigint NOT NULL,
+    state        text   NOT NULL CHECK (state IN ('pending','applying','applied','failed','abandoned')),
+    created_by   text   NOT NULL,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    applied_by   text,
+    applied_at   timestamptz
 );
 
 CREATE TABLE IF NOT EXISTS datagit_principal (

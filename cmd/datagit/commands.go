@@ -4,8 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/Glyph-Software/datagit/internal/adapter"
 
 	"github.com/Glyph-Software/datagit/internal/core"
 	"github.com/Glyph-Software/datagit/internal/store"
@@ -267,3 +270,159 @@ func cmdPurge(e *env2) error {
 func requireFlag(fs *flag.FlagSet, name string) string { return strFlag(fs, name) }
 
 var _ = core.OpUpdate
+
+// --- Schema (§10.4) ----------------------------------------------------------
+
+func cmdSchema(e *env2) error {
+	sub := "show"
+	if len(e.args) > 0 {
+		sub = e.args[0]
+	}
+	t, err := e.st.LoadTable(e.ctx, e.repo, requireFlag(e.fs, "table"))
+	if err != nil {
+		return err
+	}
+	branch := branchOr(e, store.DefaultBranch)
+
+	switch sub {
+	case "show":
+		v, err := e.st.LoadSchema(e.ctx, e.repo, t, branch)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s @ %s — schema epoch %d\n", t.Physical, branch, v.Epoch)
+		for _, c := range v.Columns {
+			null := "NOT NULL"
+			if c.Nullable {
+				null = "NULL"
+			}
+			fmt.Printf("  %-4d %-20s %-20s %s\n", c.ID, c.Name, c.SQLType, null)
+		}
+		for id, at := range v.Dropped {
+			fmt.Printf("  %-4d %-20s dropped at epoch %d (history still readable)\n",
+				id, "-", at)
+		}
+		return nil
+
+	case "add-column", "drop-column":
+		if branch == store.DefaultBranch {
+			return fmt.Errorf(
+				"%s is what direct readers compiled against: change the shape on a "+
+					"branch and propose it, so the change arrives as a migration plan "+
+					"with a rollout window (§10.4)", store.DefaultBranch)
+		}
+		cur, err := e.st.LoadSchema(e.ctx, e.repo, t, branch)
+		if err != nil {
+			return err
+		}
+		name := requireFlag(e.fs, "column")
+		want := append([]adapter.Column(nil), cur.Columns...)
+
+		if sub == "add-column" {
+			sqlType := requireFlag(e.fs, "type")
+			var next core.ColID
+			for _, c := range want {
+				if c.ID > next {
+					next = c.ID
+				}
+			}
+			for id := range cur.Dropped {
+				if id > next {
+					next = id
+				}
+			}
+			want = append(want, adapter.Column{
+				ID: next + 1, Name: name, SQLType: sqlType, Nullable: true,
+			})
+		} else {
+			var kept []adapter.Column
+			for _, c := range want {
+				if c.Name != name {
+					kept = append(kept, c)
+				}
+			}
+			if len(kept) == len(want) {
+				return fmt.Errorf("%s has no column %q", t.Physical, name)
+			}
+			want = kept
+		}
+
+		res, err := e.st.AlterBranchSchema(e.ctx, e.repo, t, branch, want, e.g.author)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s @ %s is now schema epoch %d (%d change(s))\n",
+			t.Physical, branch, res.Epoch, len(res.Changes))
+		for _, name := range res.Forked {
+			fmt.Printf("  %s narrowed, so it forked to a new column id: old versions "+
+				"stay readable in the old column (§10.5 rule 3)\n", name)
+		}
+		fmt.Printf("the live table is unchanged; propose the branch to produce a " +
+			"migration plan\n")
+		return nil
+	}
+	return fmt.Errorf("unknown schema subcommand %q", sub)
+}
+
+func cmdMigration(e *env2) error {
+	sub := "list"
+	if len(e.args) > 0 {
+		sub = e.args[0]
+	}
+	switch sub {
+	case "list":
+		plans, err := e.st.ListMigrationPlans(e.ctx, e.repo, "pending", "applying", "failed")
+		if err != nil {
+			return err
+		}
+		if len(plans) == 0 {
+			fmt.Println("no migration plans awaiting apply")
+			return nil
+		}
+		for _, p := range plans {
+			fmt.Printf("%-6d %-10s epoch %d  by %s\n", p.ID, p.State, p.TargetEpoch, p.CreatedBy)
+		}
+		return nil
+
+	case "show", "apply":
+		if len(e.args) < 2 {
+			return fmt.Errorf("usage: datagit migration %s <id>", sub)
+		}
+		id, err := strconv.ParseInt(e.args[1], 10, 64)
+		if err != nil {
+			return fmt.Errorf("migration id must be a number: %w", err)
+		}
+		if sub == "show" {
+			p, err := e.st.LoadMigrationPlan(e.ctx, e.repo, id)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("migration plan %d (%s), target epoch %d\n", p.ID, p.State, p.TargetEpoch)
+			for _, op := range p.Ops {
+				fmt.Printf("  %d. [%s] %s\n", op.Ordinal, op.Kind, op.SQL)
+			}
+			for _, r := range p.Confirm {
+				fmt.Printf("  ! %s\n", r)
+			}
+			if len(p.Confirm) > 0 {
+				fmt.Println("  apply with --confirm once readers can tolerate it")
+			}
+			return nil
+		}
+		p, err := e.st.ApplyMigrationPlan(e.ctx, e.repo, id, boolFlag(e.fs, "confirm"), e.g.author)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("applied migration plan %d — the live table now has the merged shape\n", p.ID)
+		return nil
+	}
+	return fmt.Errorf("unknown migration subcommand %q", sub)
+}
+
+// branchOr returns the --branch flag, or a default when it was not given.
+func branchOr(e *env2, def string) string {
+	if e.g.branch != "" {
+		return e.g.branch
+	}
+	return def
+}

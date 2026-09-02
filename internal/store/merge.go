@@ -12,6 +12,7 @@ import (
 	"github.com/Glyph-Software/datagit/internal/catalog"
 	"github.com/Glyph-Software/datagit/internal/core"
 	"github.com/Glyph-Software/datagit/internal/hash"
+	"github.com/Glyph-Software/datagit/internal/schemaeng"
 )
 
 // MergeResult is the outcome of a three-way merge.
@@ -26,6 +27,20 @@ type MergeResult struct {
 	Changes   []Change
 	Commit    hash.Digest
 	Applied   int
+
+	// PendingMigration is set when the merge ALSO changed the table's shape.
+	//
+	// Data merged; the schema did not. A schema change against main produces a
+	// plan to be applied deliberately, because applications read the live table
+	// directly and a column that vanishes mid-query breaks them with no rollout
+	// window (§10.4). The merge is not "half done" -- the data half is complete
+	// and committed, and the shape change is waiting for someone to choose a
+	// moment.
+	PendingMigration *MigrationPlanRecord
+
+	// SchemaConflicts are shape disagreements the two branches made that cannot
+	// be reconciled automatically (§10.3). Like data conflicts, they block.
+	SchemaConflicts []schemaeng.SchemaConflict
 }
 
 // Merge performs a three-way merge of `from` into `into` (M3, §9.2).

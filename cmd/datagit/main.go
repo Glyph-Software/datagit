@@ -56,6 +56,15 @@ Branching
   update-from-parent        Absorb the parent's newer commits (--table)
   materialize <branch>      Copy a branch into a real schema (--into)
 
+Schema
+  schema show               Show a branch's schema (--table, --branch)
+  schema add-column         Add a column ON A BRANCH (--table, --branch,
+                            --column, --type); the live table is untouched
+  schema drop-column        Drop a column on a branch (--table, --branch, --column)
+  migration [list]          Migration plans awaiting apply
+  migration show <id>       What a plan would do to the live table
+  migration apply <id>      Apply it (--confirm for narrowing or destructive)
+
 Review
   proposal [list]           List change proposals
   proposal create           Open one (--from, --into, --title)
@@ -100,9 +109,10 @@ func run(args []string) error {
 
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	g := &globals{}
-	fs.StringVar(&g.dsn, "dsn", env("DATAGIT_DSN", "postgres://datagit:datagit@localhost:55417/datagit"), "PostgreSQL DSN")
+	fs.StringVar(&g.dsn, "dsn", env("DATAGIT_DSN", "postgres://datagit:datagit@localhost:55417/datagit"),
+		"database DSN; the engine is detected from it (PostgreSQL or MySQL)")
 	fs.StringVar(&g.repo, "repo", env("DATAGIT_REPO", "default"), "repository name")
-	fs.StringVar(&g.branch, "branch", store.DefaultBranch, "branch name")
+	fs.StringVar(&g.branch, "branch", env("DATAGIT_BRANCH", store.DefaultBranch), "branch name")
 	fs.StringVar(&g.author, "author", env("DATAGIT_AUTHOR", ""), "authenticated principal")
 
 	// Subcommand flags are all registered here rather than per handler, so that
@@ -116,7 +126,7 @@ func run(args []string) error {
 	fs.String("ref", "", "external reference, such as a ticket id")
 	fs.String("at", "", "read: resolve at this commit id")
 	fs.String("as-of", "", "read: resolve as of this RFC3339 timestamp")
-	fs.String("column", "", "blame: restrict to one column")
+	fs.String("column", "", "blame: restrict to one column; schema: the column to add or drop")
 	fs.String("table", "", "revert: the table to revert within")
 	fs.Bool("force", false, "revert: proceed even if later changes would be discarded")
 	fs.Int("limit", 0, "maximum rows or commits")
@@ -124,6 +134,8 @@ func run(args []string) error {
 	fs.Int("to-seq", -1, "diff: ending sequence (default: head)")
 	fs.String("from", "", "branch/proposal: source branch")
 	fs.String("into", "", "merge/proposal/materialize: target branch or schema")
+	fs.String("type", "", "schema add-column: SQL type")
+	fs.Bool("confirm", false, "migration apply: confirm a narrowing or destructive plan")
 	fs.String("title", "", "proposal: title")
 	fs.String("reason", "", "purge: stated reason (required)")
 	fs.Int("id", 0, "proposal id")
@@ -171,6 +183,10 @@ func run(args []string) error {
 		return withStore(fs, g, rest, cmdProposal)
 	case "materialize":
 		return withStore(fs, g, rest, cmdMaterialize)
+	case "schema":
+		return withStore(fs, g, rest, cmdSchema)
+	case "migration":
+		return withStore(fs, g, rest, cmdMigration)
 	case "gc":
 		return withStore(fs, g, rest, cmdGC)
 	case "prune":

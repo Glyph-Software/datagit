@@ -397,15 +397,26 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 
 ## M6 — Schema *(v1.2, both engines)*
 
-> **Status: core complete.** S4 passed, unblocking this. Schema versioning,
+> **Status: complete.** S4 passed, unblocking this. Schema versioning,
 > structural diff with the four-way classification, the full §10.3 merge matrix,
 > migration planning with pre-flight scans and two-phase destructive drops, and
 > the resumable journalled apply wired to the database and verified to resume
 > rather than redo.
 >
-> **Remaining:** wiring schema changes through the branch/proposal flow so a
-> schema merge produces a plan the way §10.4 describes, and the full §10.5
-> sidecar evolution rules including narrowing forks to a new column id.
+> Schema changes now flow branch → proposal → plan → apply → live table. A branch
+> changes shape without the live table changing with it; merging a schema change
+> into main produces a MIGRATION PLAN rather than applying, because applications
+> read the live table directly and a column that appears or vanishes mid-query
+> has no rollout window. A plan that narrows or destroys refuses to run without
+> confirmation, naming what it would do.
+>
+> §10.5 rule 3 is enforced: a narrowing type change FORKS to a new column id, so
+> history is never coerced through a lossy cast; a widening alters in place,
+> because splitting history for a change every value survives buys nothing. The
+> acceptance tour walks the whole flow and asserts the live table's shape at each
+> step.
+>
+> **Nothing remaining.**
 
 **Gated by S4.**
 

@@ -273,3 +273,48 @@ func TestProjectTreatsAbsentColumnsAsAbsent(t *testing.T) {
 		t.Errorf("projection kept %d columns, want 2", len(got))
 	}
 }
+
+// TestTypeSynonymsAreNotChanges: the engines report different spellings for the
+// same declaration, and a spelling difference must not fork a column.
+func TestTypeSynonymsAreNotChanges(t *testing.T) {
+	same := [][2]string{
+		{"numeric(12,2)", "decimal(12,2)"},
+		{"integer", "int"},
+		{"bigint", "int8"},
+		{"boolean", "bool"},
+		{"character varying(50)", "varchar(50)"},
+		{"double precision", "float8"},
+	}
+	for _, pair := range same {
+		class, why := classifyTypeChange(pair[0], pair[1])
+		if class > adapter.Widening {
+			t.Errorf("%s -> %s classified %v (%s); they are the same type spelled "+
+				"two ways, and forking a column over a spelling loses nothing but gains "+
+				"a split history", pair[0], pair[1], class, why)
+		}
+	}
+}
+
+// TestUnsignedIsNotASynonym: an unsigned integer holds values a signed one
+// cannot, so the difference must survive normalization.
+func TestUnsignedIsNotASynonym(t *testing.T) {
+	if class, _ := classifyTypeChange("bigint unsigned", "bigint"); class <= adapter.Widening {
+		t.Error("unsigned bigint to signed bigint was treated as safe; the top half " +
+			"of the range does not fit")
+	}
+}
+
+// TestNarrowingIsNeverWidening.
+func TestNarrowingIsNeverWidening(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"numeric(12,2)", "numeric(8,2)"},
+		{"varchar(200)", "varchar(50)"},
+		{"bigint", "integer"},
+		{"text", "integer"},
+	} {
+		if class, _ := classifyTypeChange(pair[0], pair[1]); class <= adapter.Widening {
+			t.Errorf("%s -> %s classified as safe; it can lose information",
+				pair[0], pair[1])
+		}
+	}
+}

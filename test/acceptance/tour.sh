@@ -94,6 +94,46 @@ $BIN prune --table products --keep-commits 2
 $BIN gc
 $BIN verify
 
+step "schema changes reach main as a plan, not as a surprise"
+# DESIGN.md §10.4. This is the deliberately un-Git-like part: a data merge into
+# main applies immediately, a SHAPE change does not, because applications read
+# the live table directly and a column that appears or vanishes mid-query has no
+# rollout window.
+$BIN branch create shape --from main
+DATAGIT_BRANCH=shape $BIN schema add-column --table products \
+  --column margin_pct --type "numeric(5,2)"
+
+cols_before=$(psql -tAc "SELECT count(*) FROM information_schema.columns
+  WHERE table_schema='${SCHEMA}' AND table_name='products'" | tr -d ' \r')
+[ "$cols_before" = "5" ] || fail "a branch schema change altered the live table (${cols_before} columns)"
+echo "  ok    the live table still has 5 columns while the branch has 6"
+
+$BIN proposal create --from shape --into main --title "add margin_pct"
+# NR==2 skips the header row. A failure here is a failure of the tour, so there
+# is no `|| true` hiding it.
+PID=$($BIN proposal list | awk 'NR==2{print $1}')
+[ -n "$PID" ] || fail "proposal create produced no proposal"
+# main was protected earlier in the tour, so a schema change needs review like
+# any other. The author's own approval does not count.
+DATAGIT_AUTHOR="maya@example.com" $BIN proposal approve --id "$PID" -m "shape looks right"
+DATAGIT_AUTHOR="maya@example.com" $BIN proposal merge --id "$PID" --table products
+
+cols_mid=$(psql -tAc "SELECT count(*) FROM information_schema.columns
+  WHERE table_schema='${SCHEMA}' AND table_name='products'" | tr -d ' \r')
+[ "$cols_mid" = "5" ] || fail "the merge changed the live table immediately (${cols_mid} columns)"
+echo "  ok    merging did not change the live table's shape"
+
+$BIN migration list
+MID=$($BIN migration list | awk 'NR==1{print $1}')
+[ -n "$MID" ] || fail "merging a schema change produced no migration plan"
+$BIN migration show "$MID"
+DATAGIT_AUTHOR="maya@example.com" $BIN migration apply "$MID"
+
+cols_after=$(psql -tAc "SELECT count(*) FROM information_schema.columns
+  WHERE table_schema='${SCHEMA}' AND table_name='products'" | tr -d ' \r')
+[ "$cols_after" = "6" ] || fail "applying the plan did not add the column (${cols_after} columns)"
+echo "  ok    the column arrived when someone chose the moment"
+
 step "the exit door: untrack leaves the live table intact"
 # `| head` would SIGPIPE the exporter, and pipefail would end the script.
 $BIN export products > /tmp/datagit_export_$$.jsonl

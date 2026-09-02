@@ -227,6 +227,35 @@ CREATE TABLE IF NOT EXISTS datagit_purge_log (
         REFERENCES datagit_repo(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS datagit_schema_version (
+    table_id    bigint NOT NULL,
+    branch_id   binary(16) NOT NULL,
+    epoch       bigint NOT NULL,
+    columns     text   NOT NULL,
+    dropped     text   NOT NULL,
+    digest      varbinary(32) NOT NULL,
+    mask_width  int    NOT NULL,
+    created_by  varchar(255) NOT NULL,
+    created_at  datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (table_id, branch_id, epoch)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS datagit_migration_plan (
+    id           bigint NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    repo_id      binary(16) NOT NULL,
+    table_id     bigint NOT NULL,
+    proposal_id  bigint,
+    ops          text   NOT NULL,
+    target_epoch bigint NOT NULL,
+    state        varchar(16) NOT NULL CHECK (state IN ('pending','applying','applied','failed','abandoned')),
+    created_by   varchar(255) NOT NULL,
+    created_at   datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    applied_by   varchar(255),
+    applied_at   datetime(6),
+    CONSTRAINT datagit_migration_plan_repo FOREIGN KEY (repo_id)
+        REFERENCES datagit_repo(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS datagit_principal (
     id          binary(16) NOT NULL PRIMARY KEY,
     name        varchar(255) NOT NULL UNIQUE,
