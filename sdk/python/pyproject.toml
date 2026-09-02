@@ -1,5 +1,5 @@
 [project]
-name = "datagit"
+name = "datagit-sdk"
 version = "0.0.0"
 description = "DataGit's Python SDK: Git-style version control for rows in your own database"
 readme = "README.md"

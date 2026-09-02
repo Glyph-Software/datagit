@@ -56,7 +56,7 @@ slowest possible way to write.
 
 ## Versioning
 
-This package and the Python `datagit` package are the same contract twice and
+This package and the PyPI `datagit-sdk` package are the same contract twice and
 release on one version number. A change to the canonical encoding is always a
 major, even when this SDK's own API is untouched.
 

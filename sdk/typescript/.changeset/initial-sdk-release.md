@@ -4,7 +4,7 @@
 
 First release of the DataGit SDKs.
 
-`@glyphsoftware/datagit-sdk` on npm and `datagit` on PyPI are the same contract
+`@glyphsoftware/datagit-sdk` on npm and `datagit-sdk` on PyPI are the same contract
 twice, generated from `api/proto/datagit/v1/datagit.proto` plus a thin ergonomic
 layer, and released together on one version number.
 

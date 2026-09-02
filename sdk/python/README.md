@@ -1,11 +1,14 @@
-# datagit
+# datagit-sdk
 
 Python SDK for [DataGit](https://github.com/Glyph-Software/datagit) — Git-style
 version control for rows in your own PostgreSQL or MySQL database.
 
 ```bash
-pip install datagit
+pip install datagit-sdk
 ```
+
+Installed as `datagit-sdk`, imported as `datagit` — the distribution name and the
+import package are separate in Python, and the import keeps the shorter name.
 
 ```python
 from decimal import Decimal
@@ -50,8 +53,8 @@ slowest possible way to write.
 
 ## Versioning
 
-This package and the TypeScript `@glyphsoftware/datagit-sdk` package are the same
-contract twice and release on one version number. A change to the canonical
+This package and the npm `@glyphsoftware/datagit-sdk` package are the same contract
+twice and release on one version number. A change to the canonical
 encoding is always a major, even when this SDK's own API is untouched.
 
 Apache 2.0.

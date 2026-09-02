@@ -12,7 +12,7 @@ to `cd sdk/typescript`, and `make changeset` from the root does that for you.
 
 ## The SDKs share one version
 
-`@glyphsoftware/datagit-sdk` and the Python `datagit` package are versioned and
+`@glyphsoftware/datagit-sdk` and the PyPI `datagit-sdk` package are versioned and
 released **together**, and a changeset here bumps both.
 
 They are the same contract twice: both are generated from
