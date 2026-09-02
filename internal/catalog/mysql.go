@@ -256,6 +256,27 @@ CREATE TABLE IF NOT EXISTS datagit_migration_plan (
         REFERENCES datagit_repo(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS datagit_pii_column (
+    table_id     bigint  NOT NULL,
+    column_id    int     NOT NULL,
+    subject_col  int     NOT NULL,
+    designated_by varchar(255) NOT NULL,
+    designated_at datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (table_id, column_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS datagit_dek (
+    repo_id     binary(16) NOT NULL,
+    subject     varchar(255) NOT NULL,
+    wrapped_dek varbinary(255),
+    created_at  datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    erased_at   datetime(6),
+    erased_by   varchar(255),
+    PRIMARY KEY (repo_id, subject),
+    CONSTRAINT datagit_dek_repo FOREIGN KEY (repo_id)
+        REFERENCES datagit_repo(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS datagit_principal (
     id          binary(16) NOT NULL PRIMARY KEY,
     name        varchar(255) NOT NULL UNIQUE,

@@ -23,6 +23,7 @@ import (
 
 	"github.com/Glyph-Software/datagit/internal/catalog"
 	"github.com/Glyph-Software/datagit/internal/core"
+	"github.com/Glyph-Software/datagit/internal/crypto"
 	"github.com/Glyph-Software/datagit/internal/db"
 	"github.com/Glyph-Software/datagit/internal/hash"
 )
@@ -33,9 +34,22 @@ const DefaultBranch = "main"
 type Store struct {
 	pool db.Pool
 	ad   adapter.Adapter
+
+	// envelope wraps per-subject data encryption keys under a key-encryption key
+	// (§13.3). Nil when crypto-shredding is not configured, which is the default:
+	// it is an operational dependency with real weight, and a deployment that
+	// does not designate PII should not have to carry it.
+	envelope crypto.Envelope
 }
 
 func New(pool db.Pool, ad adapter.Adapter) *Store { return &Store{pool: pool, ad: ad} }
+
+// WithEnvelope enables crypto-shredding by supplying the key-encryption key.
+//
+// In production this is KMS-backed and the key never enters the process. Losing
+// a wrapped key is indistinguishable from erasing it, so durability is the KMS's
+// problem and deliberately not DataGit's.
+func (s *Store) WithEnvelope(e crypto.Envelope) *Store { s.envelope = e; return s }
 
 // Repo identifies a repository.
 type Repo struct {
@@ -69,6 +83,16 @@ func (t *Table) ColIDs() []core.ColID {
 		out = append(out, c.ID)
 	}
 	return out
+}
+
+// ColumnByName finds a column by its live-table name.
+func (t *Table) ColumnByName(name string) (adapter.Column, bool) {
+	for _, c := range t.Columns {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return adapter.Column{}, false
 }
 
 func (t *Table) Column(id core.ColID) (adapter.Column, bool) {
@@ -383,6 +407,13 @@ func (s *Store) Commit(ctx context.Context, req CommitRequest) (*CommitResult, e
 		changes := append([]Change(nil), req.Changes...)
 		sort.Slice(changes, func(i, j int) bool { return changes[i].PK < changes[j].PK })
 
+		// PII sealing is prepared once per commit (§13.3). Nil when the table
+		// designates none, which costs nothing.
+		seal, err := s.newSealer(ctx, req.Repo, req.Table)
+		if err != nil {
+			return err
+		}
+
 		var leaves []hash.Change
 		for _, ch := range changes {
 			before, live, err := s.currentRow(ctx, tx, req.Table, chain, ch.PK)
@@ -417,7 +448,13 @@ func (s *Store) Commit(ctx context.Context, req CommitRequest) (*CommitResult, e
 			if err := s.closeOpen(ctx, tx, req.Table, branchID, ch.PK, newSeq); err != nil {
 				return err
 			}
-			if err := s.insertVersion(ctx, tx, req.Table, branchID, newSeq, op, ch, mask); err != nil {
+			// The SIDECAR gets the sealed row; the live table and the commit hash
+			// both use the plaintext one (§13.3).
+			stored := ch
+			if stored.Row, err = seal.seal(ch.Row); err != nil {
+				return fmt.Errorf("sealing PII: %w", err)
+			}
+			if err := s.insertVersion(ctx, tx, req.Table, branchID, newSeq, op, stored, mask); err != nil {
 				return err
 			}
 			leaves = append(leaves, hash.Change{

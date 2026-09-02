@@ -11,6 +11,7 @@ import (
 	"github.com/Glyph-Software/datagit/internal/adapter"
 
 	"github.com/Glyph-Software/datagit/internal/core"
+	"github.com/Glyph-Software/datagit/internal/crypto"
 	"github.com/Glyph-Software/datagit/internal/store"
 )
 
@@ -425,4 +426,104 @@ func branchOr(e *env2, def string) string {
 		return e.g.branch
 	}
 	return def
+}
+
+// --- Compliance (§13.3) ------------------------------------------------------
+
+func cmdPII(e *env2) error {
+	sub := "list"
+	if len(e.args) > 0 {
+		sub = e.args[0]
+	}
+	t, err := e.st.LoadTable(e.ctx, e.repo, requireFlag(e.fs, "table"))
+	if err != nil {
+		return err
+	}
+	switch sub {
+	case "list":
+		cols, err := e.st.PIIColumns(e.ctx, t)
+		if err != nil {
+			return err
+		}
+		if len(cols) == 0 {
+			fmt.Printf("%s designates no PII columns\n", t.Physical)
+			return nil
+		}
+		for _, c := range cols {
+			fmt.Printf("  %-20s subject from %s\n", c.Name, c.SubjectName)
+		}
+		fmt.Println("crypto-shredding protects these columns and no others: personal data")
+		fmt.Println("in an undesignated field is not covered by it")
+		return nil
+
+	case "designate":
+		st, err := withEnvelope(e)
+		if err != nil {
+			return err
+		}
+		col := requireFlag(e.fs, "column")
+		subj := requireFlag(e.fs, "subject-column")
+		if err := st.DesignatePII(e.ctx, e.repo, t, col, subj, e.g.author); err != nil {
+			return err
+		}
+		fmt.Printf("%s.%s is PII, with the data subject read from %s\n", t.Physical, col, subj)
+		fmt.Println("existing history for that column has been sealed")
+		return nil
+	}
+	return fmt.Errorf("unknown pii subcommand %q", sub)
+}
+
+func cmdErase(e *env2) error {
+	if len(e.args) < 1 {
+		return fmt.Errorf("usage: datagit erase <subject> --table <t> --reason <why>")
+	}
+	st, err := withEnvelope(e)
+	if err != nil {
+		return err
+	}
+	t, err := st.LoadTable(e.ctx, e.repo, requireFlag(e.fs, "table"))
+	if err != nil {
+		return err
+	}
+	reason := requireFlag(e.fs, "reason")
+	if reason == "" {
+		return fmt.Errorf("--reason is required: an erasure is a recorded act")
+	}
+	rep, err := st.EraseSubject(e.ctx, e.repo, t, e.args[0], reason, e.g.author)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("erased data subject %s\n", rep.Subject)
+	fmt.Printf("  %d current row(s) deleted by commit %s\n", rep.RowsErased, rep.Commit.Short())
+	fmt.Printf("  key destroyed: every historical value for them is now unreadable\n")
+	fmt.Printf("  the hash chain is untouched and still verifies\n")
+	return nil
+}
+
+// withEnvelope returns a store with crypto-shredding enabled, loading the
+// key-encryption key from a file.
+//
+// In production this key lives in a KMS and never enters the process. The file
+// form exists so the mechanism can be exercised without one, and it is worth
+// being blunt: a KEK on disk beside the database protects against very little.
+func withEnvelope(e *env2) (*store.Store, error) {
+	path := requireFlag(e.fs, "kek-file")
+	if path == "" {
+		return nil, fmt.Errorf(
+			"--kek-file (or DATAGIT_KEK_FILE) is required: crypto-shredding needs a " +
+				"key-encryption key, and a lost key is indistinguishable from an erased " +
+				"one, so its durability is the key store's problem (§13.3)")
+	}
+	kek, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading the key-encryption key: %w", err)
+	}
+	if len(kek) > crypto.KeyLen {
+		kek = kek[:crypto.KeyLen]
+	}
+	env, err := crypto.NewLocalEnvelope(kek)
+	if err != nil {
+		return nil, err
+	}
+	return e.st.WithEnvelope(env), nil
 }

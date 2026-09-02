@@ -78,6 +78,13 @@ Verification and operations
   prune                     Apply a retention policy (--table, --keep-commits)
   purge <table>             Physically erase a row (--pk, --reason); audited
 
+Compliance
+  pii list                  Show designated PII columns (--table)
+  pii designate             Designate a column (--table, --column, --subject-column)
+  erase <subject>           Right-to-erasure: delete current rows and destroy
+                            the subject's key (--table, --reason). History stays
+                            hash-verifiable; erased values read as <erased>.
+
 Global flags:
   --dsn      PostgreSQL connection string (or $DATAGIT_DSN)
   --repo     Repository name (default "default")
@@ -135,6 +142,9 @@ func run(args []string) error {
 	fs.String("from", "", "branch/proposal: source branch")
 	fs.String("into", "", "merge/proposal/materialize: target branch or schema")
 	fs.String("type", "", "schema add-column: SQL type")
+	fs.String("subject-column", "", "pii designate: the column identifying the data subject")
+	fs.String("kek-file", env("DATAGIT_KEK_FILE", ""),
+		"file holding the 32-byte key-encryption key for crypto-shredding")
 	fs.Bool("confirm", false, "migration apply: confirm a narrowing or destructive plan")
 	fs.String("title", "", "proposal: title")
 	fs.String("reason", "", "purge: stated reason (required)")
@@ -193,6 +203,10 @@ func run(args []string) error {
 		return withStore(fs, g, rest, cmdPrune)
 	case "purge":
 		return withStore(fs, g, rest, cmdPurge)
+	case "pii":
+		return withStore(fs, g, rest, cmdPII)
+	case "erase":
+		return withStore(fs, g, rest, cmdErase)
 	}
 	return fmt.Errorf("unknown command %q (try: datagit help)", cmd)
 }

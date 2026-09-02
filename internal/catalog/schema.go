@@ -4,7 +4,7 @@ package catalog
 
 // ControlSchemaVersion is the version of the control-plane schema this build
 // understands. Startup refuses to run against a newer one (DESIGN.md §17.2).
-const ControlSchemaVersion = 2
+const ControlSchemaVersion = 3
 
 // ControlSchema is the DESIGN.md §5.3 control schema, with the Phase 0 findings
 // applied. It is written to be idempotent so it runs through the same resumable
@@ -242,6 +242,40 @@ CREATE TABLE IF NOT EXISTS datagit_migration_plan (
     created_at   timestamptz NOT NULL DEFAULT now(),
     applied_by   text,
     applied_at   timestamptz
+);
+
+-- PII designation (§13.3). Which columns hold personal data, and how to find
+-- the data subject a row belongs to.
+--
+-- Designation is per COLUMN, and the limit is stated rather than hidden:
+-- crypto-shredding only protects what is designated. Personal data that leaks
+-- into an undesignated notes field is not covered by it.
+CREATE TABLE IF NOT EXISTS datagit_pii_column (
+    table_id     bigint  NOT NULL,
+    column_id    integer NOT NULL,
+    -- subject_column names the column holding the data subject's identifier.
+    -- It is a column of the SAME table: resolving a subject through a join
+    -- would make erasure depend on a second table's current state, and erasure
+    -- must work from the row alone.
+    subject_col  integer NOT NULL,
+    designated_by text   NOT NULL,
+    designated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (table_id, column_id)
+);
+
+-- Per-subject data encryption keys, envelope-wrapped (§13.3).
+--
+-- Erasure NULLs wrapped_dek and keeps the row. The tombstone is the point: a
+-- missing row cannot be told apart from a subject that never existed, and an
+-- audit trail has to answer "was this erased, and when".
+CREATE TABLE IF NOT EXISTS datagit_dek (
+    repo_id     uuid NOT NULL REFERENCES datagit_repo(id) ON DELETE CASCADE,
+    subject     text NOT NULL,
+    wrapped_dek bytea,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    erased_at   timestamptz,
+    erased_by   text,
+    PRIMARY KEY (repo_id, subject)
 );
 
 CREATE TABLE IF NOT EXISTS datagit_principal (

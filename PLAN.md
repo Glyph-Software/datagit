@@ -436,15 +436,25 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 
 ## M7 — Compliance *(v1.3)*
 
-> **Status: crypto-shredding implemented.** AES-256-GCM with per-subject keys,
+> **Status: crypto-shredding complete end to end.** AES-256-GCM with per-subject keys,
 > envelope-wrapped so the database never holds usable key material, and each
 > ciphertext bound to its table, row, and column so a value cannot be silently
 > relocated. Destroying one key renders every ciphertext for that subject
 > unreadable at once without touching a history row, so the hash chain stays
 > valid.
 >
-> **Remaining:** wiring PII column designation and subject resolution into the
-> store, external anchoring, commit signing, and the TypeScript and Python SDKs.
+> PII designation and subject resolution are wired into the store. A designated
+> column is sealed on the way into the SIDECAR and stays plaintext in the live
+> table, so direct readers need no key. Designating a column also seals the
+> history that already exists — a designation that leaves the backfill readable
+> is not a designation.
+>
+> Erasure is two steps in one operation: the subject's current rows go by an
+> ordinary commit, and their key is destroyed. A test asserts the hash chain
+> still verifies afterwards, which is the property the whole mechanism exists
+> for. Erased values read as a marker, not a decryption error.
+>
+> **Remaining:** the TypeScript and Python SDKs (M7.4).
 
 | Unit | Design ref | Notes |
 |---|---|---|

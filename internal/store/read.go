@@ -269,7 +269,35 @@ func (s *Store) History(ctx context.Context, repo *Repo, t *Table, branch string
 		}
 		out = append(out, rec)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Historical reads open sealed PII, or show the erasure marker where the
+	// subject's key is gone (§13.3). A marker, not a decryption error: an erasure
+	// is a fact about the record, and the record should say so plainly rather
+	// than look corrupt.
+	return s.unsealAll(ctx, repo, t, out)
+}
+
+// unsealAll opens the PII in a run of historical versions.
+func (s *Store) unsealAll(ctx context.Context, repo *Repo, t *Table, recs []VersionRecord) (
+	[]VersionRecord, error) {
+
+	if s.envelope == nil || len(recs) == 0 {
+		return recs, nil
+	}
+	cols, err := s.PIIColumns(ctx, t)
+	if err != nil || len(cols) == 0 {
+		return recs, err
+	}
+	for i := range recs {
+		row, err := s.DecryptPII(ctx, repo, t, recs[i].Row)
+		if err != nil {
+			return nil, err
+		}
+		recs[i].Row = row
+	}
+	return recs, nil
 }
 
 // CellBlame attributes one cell's current value.

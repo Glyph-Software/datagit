@@ -197,6 +197,22 @@ func (v Value) Equal(o Value) bool {
 	return false
 }
 
+// Plain is the value's textual content, with no display quoting.
+//
+// String() is for HUMANS and quotes text so an empty string and a NULL can be
+// told apart on a terminal. Plain is for MACHINES: encryption input, key
+// lookups, and anywhere the exact characters matter. Using String() for those
+// silently embeds quote marks in the data.
+func (v Value) Plain() string {
+	switch v.Kind {
+	case KindText, KindNumeric:
+		return v.Text
+	case KindNull:
+		return ""
+	}
+	return v.String()
+}
+
 func (v Value) String() string {
 	switch v.Kind {
 	case KindNull:
