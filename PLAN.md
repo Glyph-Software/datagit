@@ -291,6 +291,15 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 
 ## M4 — Production *(v1.0, PostgreSQL)*
 
+> **Status: compliance core complete.** Retention with interval-extending
+> thinning, garbage collection for deleted branches and expired sessions, audited
+> hard purge with tombstones and `integrity = 'purged'`, and all three verify
+> modes (drift, integrity, intervals).
+>
+> **Remaining:** partitioning (M4.5), the performance regression gates (M4.6),
+> trigger modes (M4.7), observability (M4.8), OIDC (M4.9), deployment artifacts
+> (M4.10), and documentation (M4.11).
+
 | Unit | Design ref | Notes |
 |---|---|---|
 | **M4.1 Retention policies** | §13.1 | Age, depth, density thinning; protected commits never pruned; **thinned periods keep a marker**. |

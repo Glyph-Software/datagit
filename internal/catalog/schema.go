@@ -179,6 +179,19 @@ CREATE TABLE IF NOT EXISTS datagit_migration_journal (
     PRIMARY KEY (plan_id, ordinal)
 );
 
+-- The purge tombstone (§13.4). It records THAT a purge happened -- by whom,
+-- when, why, and how many versions -- and never the purged content.
+CREATE TABLE IF NOT EXISTS datagit_purge_log (
+    id               bigserial PRIMARY KEY,
+    repo_id          uuid   NOT NULL REFERENCES datagit_repo(id) ON DELETE CASCADE,
+    table_id         bigint NOT NULL,
+    pk_bytes         bytea  NOT NULL,
+    versions_removed integer NOT NULL,
+    reason           text   NOT NULL,
+    purged_by        text   NOT NULL,
+    purged_at        timestamptz NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS datagit_principal (
     id          uuid PRIMARY KEY,
     name        text NOT NULL UNIQUE,
