@@ -1,0 +1,17 @@
+[project]
+name = "datagit"
+version = "0.1.0"
+description = "DataGit's Python SDK: Git-style version control for rows in your own database"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+dependencies = ["grpcio>=1.60", "protobuf>=4.25"]
+
+[project.optional-dependencies]
+dev = ["pytest", "grpcio-tools"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["datagit*"]

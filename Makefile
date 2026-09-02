@@ -72,6 +72,25 @@ test-integration-mysql: ## Integration tests against MySQL 8.4
 	@echo "== MySQL 8.4 =="
 	DATAGIT_TEST_DSN="$(MYSQL_DSN)" go test ./test/integration/ -count=1
 
+.PHONY: sdk-py
+sdk-py: ## Regenerate the Python SDK stubs from the proto
+	python3 -m grpc_tools.protoc -Iapi/proto \
+	  --python_out=sdk/python --grpc_python_out=sdk/python --pyi_out=sdk/python \
+	  api/proto/datagit/v1/datagit.proto
+
+.PHONY: test-sdk-py
+test-sdk-py: ## Python SDK tests
+	cd sdk/python && python3 -m pytest tests/ -q
+
+.PHONY: sdk-ts
+sdk-ts: ## Regenerate the TypeScript SDK stubs from the proto
+	cd sdk/typescript && npm install --no-audit --no-fund
+	buf generate --template buf.gen.ts.yaml
+
+.PHONY: test-sdk-ts
+test-sdk-ts: ## TypeScript SDK tests
+	cd sdk/typescript && npm test
+
 .PHONY: test-bench
 test-bench: ## Performance regression gates on every engine (M4.6, M5.3)
 	@echo "== PostgreSQL 17 =="

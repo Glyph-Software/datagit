@@ -436,7 +436,7 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 
 ## M7 — Compliance *(v1.3)*
 
-> **Status: crypto-shredding complete end to end.** AES-256-GCM with per-subject keys,
+> **Status: complete.** AES-256-GCM with per-subject keys,
 > envelope-wrapped so the database never holds usable key material, and each
 > ciphertext bound to its table, row, and column so a value cannot be silently
 > relocated. Destroying one key renders every ciphertext for that subject
@@ -454,7 +454,12 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 > still verifies afterwards, which is the property the whole mechanism exists
 > for. Erased values read as a marker, not a decryption error.
 >
-> **Remaining:** the TypeScript and Python SDKs (M7.4).
+> The TypeScript and Python SDKs (M7.4) are generated stubs plus a thin
+> ergonomic layer. Neither lets a client set a commit author, neither carries an
+> exact number as a float, and neither builds a filter from a string — the three
+> places an SDK would quietly undo a guarantee the service enforces.
+>
+> **Nothing remaining.**
 
 | Unit | Design ref | Notes |
 |---|---|---|
