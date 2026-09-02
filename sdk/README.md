@@ -7,7 +7,7 @@ hiding what the service does.
 | | Path | Package | Regenerate | Test |
 |---|---|---|---|---|
 | Python | `sdk/python` | `datagit` on PyPI | `make sdk-py` | `make test-sdk-py` |
-| TypeScript | `sdk/typescript` | `@glyph-software/datagit` on npm | `make sdk-ts` | `make test-sdk-ts` |
+| TypeScript | `sdk/typescript` | `@glyphsoftware/datagit-sdk` on npm | `make sdk-ts` | `make test-sdk-ts` |
 
 Both are generated from `api/proto/datagit/v1/datagit.proto`. `make sdk-py` needs
 `grpcio-tools`; point `PYTHON` at a virtualenv if your system Python is
@@ -68,7 +68,7 @@ with Client("datagit.internal:443", api_key=KEY) as c:
 ## TypeScript
 
 ```ts
-import { DataGitClient, col, dec } from "@glyph-software/datagit";
+import { DataGitClient, col, dec } from "@glyphsoftware/datagit-sdk";
 
 const c = new DataGitClient({ baseUrl: "https://datagit.internal", apiKey: KEY });
 
@@ -144,8 +144,8 @@ Neither is needed until the first release.
 
 | | |
 |---|---|
-| **npm** | An `NPM_TOKEN` repository secret with publish rights on the `@glyph-software` scope. The workflow publishes with [provenance](https://docs.npmjs.com/generating-provenance-statements), so it also needs `id-token: write` — already set. |
-| **PyPI** | A [trusted publisher](https://docs.pypi.org/trusted-publishers/) for `datagit`: owner `Glyph-Software`, repository `datagit`, workflow `sdk-release.yml`, environment `pypi`. No token, so there is no long-lived credential to leak. |
+| **npm** | The `@glyphsoftware` scope must exist on npm, and an `NPM_TOKEN` repository secret must have publish rights on it. Use a **granular access token** scoped to this package, not a classic automation token. The workflow publishes with [provenance](https://docs.npmjs.com/generating-provenance-statements), so it also needs `id-token: write` — already set. |
+| **PyPI** | A [trusted publisher](https://docs.pypi.org/trusted-publishers/) for `datagit`: owner `Glyph-Software`, repository `datagit`, workflow `sdk-release.yml`, environment `pypi`. No token, so there is no long-lived credential to leak. **Check the name is free first** — `datagit` is generic, and a taken name fails the PyPI half of a release after npm has already published. If it is taken, rename the project in `sdk/python/pyproject.toml` (the import package stays `datagit`) before the first release, not after.|
 
 The `pypi` environment should be created in repository settings, with required
 reviewers if you want a human gate in front of the upload itself.

@@ -1,14 +1,14 @@
-# @glyph-software/datagit
+# @glyphsoftware/datagit-sdk
 
 TypeScript SDK for [DataGit](https://github.com/Glyph-Software/datagit) — Git-style
 version control for rows in your own PostgreSQL or MySQL database.
 
 ```bash
-npm install @glyph-software/datagit
+npm install @glyphsoftware/datagit-sdk
 ```
 
 ```ts
-import { DataGitClient, col, dec } from "@glyph-software/datagit";
+import { DataGitClient, col, dec } from "@glyphsoftware/datagit-sdk";
 
 const c = new DataGitClient({ baseUrl: "https://datagit.internal", apiKey: KEY });
 

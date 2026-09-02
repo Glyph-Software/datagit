@@ -50,7 +50,7 @@ slowest possible way to write.
 
 ## Versioning
 
-This package and the TypeScript `@glyph-software/datagit` package are the same
+This package and the TypeScript `@glyphsoftware/datagit-sdk` package are the same
 contract twice and release on one version number. A change to the canonical
 encoding is always a major, even when this SDK's own API is untouched.
 

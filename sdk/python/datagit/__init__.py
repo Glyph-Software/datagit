@@ -17,7 +17,7 @@ It does not build predicates from strings. Filters are typed expressions with no
 SQL text form, so there is nothing to inject into (§15.4).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.0.0"
 
 from .client import (
     Client,
