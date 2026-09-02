@@ -96,12 +96,20 @@ func (s *Store) loadSchemaAt(ctx context.Context, t *Table, branchID uuid.UUID, 
 	}
 	dropped := map[string]int64{}
 	if len(droppedJSON) > 0 {
-		_ = json.Unmarshal(droppedJSON, &dropped)
+		if err := json.Unmarshal(droppedJSON, &dropped); err != nil {
+			return nil, fmt.Errorf("schema version %d has an unreadable dropped set: %w", e, err)
+		}
 	}
 	for k, at := range dropped {
-		if id, err := strconv.Atoi(k); err == nil {
-			v.Dropped[core.ColID(id)] = at
+		// Parse at the width of core.ColID rather than through int: nextColID
+		// derives the next column id from v.Dropped, so an entry lost to a
+		// truncating conversion or a bad key would let it reissue an id an
+		// earlier epoch already used (§10.5 rule 2).
+		id, err := strconv.ParseUint(k, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("schema version %d has a bad dropped column id %q: %w", e, k, err)
 		}
+		v.Dropped[core.ColID(id)] = at
 	}
 	return v, nil
 }
