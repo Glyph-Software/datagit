@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/Glyph-Software/datagit/internal/adapter"
+	"github.com/Glyph-Software/datagit/internal/adapter/postgres"
 	"github.com/Glyph-Software/datagit/internal/core"
 )
 
@@ -195,7 +196,7 @@ func TestPlanOrdersSafeOperationsFirst(t *testing.T) {
 	to := ver(col(1, "sku", "text", false), col(2, "price", "bigint", true),
 		col(4, "margin", "numeric(5,2)", true))
 
-	p := Plan(1, "products", Diff(base, to))
+	p := Plan(postgres.New(), 1, "products", Diff(base, to))
 	if len(p.Ops) == 0 {
 		t.Fatal("empty plan")
 	}
@@ -234,7 +235,7 @@ func TestPlanOrdersSafeOperationsFirst(t *testing.T) {
 func TestNarrowingGetsAPreflightScan(t *testing.T) {
 	base := ver(col(1, "sku", "text", false), col(2, "price", "integer", true))
 	to := ver(col(1, "sku", "text", false), col(2, "price", "integer", false))
-	p := Plan(1, "products", Diff(base, to))
+	p := Plan(postgres.New(), 1, "products", Diff(base, to))
 
 	if len(p.Ops) < 2 || p.Ops[0].Kind != "preflight_not_null" {
 		t.Fatalf("adding NOT NULL must be preceded by a pre-flight scan, got %+v", p.Ops)
@@ -244,13 +245,13 @@ func TestNarrowingGetsAPreflightScan(t *testing.T) {
 // TestRequiresConfirmationNamesTheRisk.
 func TestRequiresConfirmationNamesTheRisk(t *testing.T) {
 	base := ver(col(1, "sku", "text", false), col(2, "legacy", "text", true))
-	safe := Plan(1, "products", Diff(base,
+	safe := Plan(postgres.New(), 1, "products", Diff(base,
 		ver(col(1, "sku", "text", false), col(2, "legacy", "text", true), col(3, "new", "text", true))))
 	if need, _ := RequiresConfirmation(safe); need {
 		t.Error("a purely additive plan must not require confirmation")
 	}
 
-	risky := Plan(1, "products", Diff(base, ver(col(1, "sku", "text", false))))
+	risky := Plan(postgres.New(), 1, "products", Diff(base, ver(col(1, "sku", "text", false))))
 	need, reasons := RequiresConfirmation(risky)
 	if !need || len(reasons) == 0 {
 		t.Fatal("a destructive plan must require confirmation and say why")

@@ -16,10 +16,9 @@ import (
 	"time"
 
 	"github.com/Glyph-Software/datagit/internal/adapter"
-	"github.com/Glyph-Software/datagit/internal/adapter/postgres"
+	"github.com/Glyph-Software/datagit/internal/connect"
 	"github.com/Glyph-Software/datagit/internal/core"
 	"github.com/Glyph-Software/datagit/internal/hash"
-	"github.com/Glyph-Software/datagit/internal/pg"
 	"github.com/Glyph-Software/datagit/internal/store"
 )
 
@@ -200,12 +199,12 @@ func withStore(fs *flag.FlagSet, g *globals, args []string, fn func(*env2) error
 	e.args = positional
 
 	ctx := context.Background()
-	pool, err := pg.Open(ctx, g.dsn)
+	pool, ad, err := connect.Open(ctx, g.dsn)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	st := store.New(pool, postgres.New())
+	st := store.New(pool, ad)
 	if err := st.CheckControlSchema(ctx); err != nil {
 		return err
 	}
@@ -230,12 +229,12 @@ func cmdRepo(fs *flag.FlagSet, g *globals, args []string) error {
 		return fmt.Errorf("--author is required: commits carry a verified principal (§15.2)")
 	}
 	ctx := context.Background()
-	pool, err := pg.Open(ctx, g.dsn)
+	pool, ad, err := connect.Open(ctx, g.dsn)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	st := store.New(pool, postgres.New())
+	st := store.New(pool, ad)
 	if err := st.InitControlSchema(ctx); err != nil {
 		return err
 	}

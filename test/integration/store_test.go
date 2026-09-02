@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/Glyph-Software/datagit/internal/adapter"
-	"github.com/Glyph-Software/datagit/internal/adapter/postgres"
+	"github.com/Glyph-Software/datagit/internal/connect"
 	"github.com/Glyph-Software/datagit/internal/core"
-	"github.com/Glyph-Software/datagit/internal/pg"
+	"github.com/Glyph-Software/datagit/internal/db"
 	"github.com/Glyph-Software/datagit/internal/store"
 )
 
@@ -33,60 +33,103 @@ func dsn() string {
 }
 
 type fixture struct {
-	ctx   context.Context
-	pool  *pg.Pool
-	store *store.Store
-	repo  *store.Repo
-	table *store.Table
+	ctx     context.Context
+	pool    db.Pool
+	store   *store.Store
+	repo    *store.Repo
+	table   *store.Table
+	ad      adapter.Adapter
+	dialect adapter.Dialect
 }
 
-// setup builds an isolated schema per test, so tests neither collide nor depend
-// on order.
+// setup builds an isolated namespace per test, so tests neither collide nor
+// depend on order.
+//
+// The SAME fixture serves both engines, driven only by DATAGIT_TEST_DSN. That is
+// the point: every test in this package is a test of both engines, so a feature
+// cannot ship working on one of them (§4.3, PLAN.md M5). Only three things below
+// know which engine they are on -- how to make an isolated namespace, how to
+// point a connection at it, and the two column types the fixture table declares.
 func setup(t *testing.T) *fixture {
 	t.Helper()
 	ctx := context.Background()
-	pool, err := pg.Open(ctx, dsn())
+	base, ad, err := connect.Open(ctx, dsn())
 	if err != nil {
+		// Skipping is only right when nobody asked for a particular database. When
+		// DATAGIT_TEST_DSN names one, an unreachable database is a FAILURE: a
+		// silently skipped engine reports "ok" for a suite that ran nothing, which
+		// is how an engine stays broken while CI stays green.
+		if os.Getenv("DATAGIT_TEST_DSN") != "" {
+			t.Fatalf("DATAGIT_TEST_DSN names a database that is not reachable: %v", err)
+		}
 		t.Skipf("no database at %s: %v", dsn(), err)
 	}
+	t.Cleanup(base.Close)
+
+	ns := fmt.Sprintf("it_%d", time.Now().UnixNano())
+	var scopedDSN string
+	if ad.Dialect() == adapter.MySQL {
+		// MySQL has no schemas: a database IS the namespace, so the connection
+		// has to be reopened against a different database rather than re-pointed.
+		must(t, base.Direct().Exec(ctx, "CREATE DATABASE "+ns))
+		t.Cleanup(func() { _ = base.Direct().Exec(ctx, "DROP DATABASE IF EXISTS "+ns) })
+		scopedDSN = swapMySQLDatabase(dsn(), ns)
+	} else {
+		must(t, base.Direct().Exec(ctx, "CREATE SCHEMA "+ns))
+		t.Cleanup(func() { _ = base.Direct().Exec(ctx, "DROP SCHEMA IF EXISTS "+ns+" CASCADE") })
+		scopedDSN = dsn() + "?search_path=" + ns
+	}
+
+	pool, ad, err := connect.Open(ctx, scopedDSN)
+	must(t, err)
 	t.Cleanup(pool.Close)
 
-	schema := fmt.Sprintf("it_%d", time.Now().UnixNano())
-	must(t, pool.Direct().Exec(ctx, fmt.Sprintf(`CREATE SCHEMA %s`, schema)))
-	t.Cleanup(func() {
-		_ = pool.Direct().Exec(ctx, fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, schema))
-	})
-	must(t, pool.Direct().Exec(ctx, fmt.Sprintf(`SET search_path TO %s`, schema)))
-
-	// A fresh pool so every connection lands in the test's schema.
-	pool2, err := pg.Open(ctx, dsn()+"?search_path="+schema)
-	must(t, err)
-	t.Cleanup(pool2.Close)
-
-	st := store.New(pool2, postgres.New())
+	st := store.New(pool, ad)
 	must(t, st.InitControlSchema(ctx))
 	must(t, st.CheckControlSchema(ctx))
 
-	must(t, pool2.Direct().Exec(ctx, `
+	// The two types that genuinely differ. A MySQL primary key needs a bounded
+	// length, and the timestamp and decimal types are spelled differently.
+	skuType, tsType := "text", "timestamptz"
+	if ad.Dialect() == adapter.MySQL {
+		skuType, tsType = "varchar(64)", "datetime(6)"
+	}
+	must(t, pool.Direct().Exec(ctx, fmt.Sprintf(`
 		CREATE TABLE products (
-			sku        text PRIMARY KEY,
+			sku        %s PRIMARY KEY,
 			name       text,
-			category   text,
-			price      numeric(12,2),
-			updated_at timestamptz
-		)`))
-	must(t, pool2.Direct().Exec(ctx, `
+			category   varchar(64),
+			price      decimal(12,2),
+			updated_at %s
+		)`, skuType, tsType)))
+	must(t, pool.Direct().Exec(ctx, `
 		INSERT INTO products VALUES
-			('TENT-4P', 'Four-person tent', 'outdoor', 249.00, '2026-03-02T00:00:00Z'),
-			('STOVE-V1','Camp stove',       'outdoor',  89.50, '2026-03-02T00:00:00Z'),
-			('MUG-01',  'Enamel mug',       'kitchen',  12.00, '2026-03-02T00:00:00Z')`))
+			('TENT-4P', 'Four-person tent', 'outdoor', 249.00, '2026-03-02 00:00:00'),
+			('STOVE-V1','Camp stove',       'outdoor',  89.50, '2026-03-02 00:00:00'),
+			('MUG-01',  'Enamel mug',       'kitchen',  12.00, '2026-03-02 00:00:00')`))
 
 	repo, err := st.CreateRepo(ctx, "catalog", principal)
 	must(t, err)
 	tbl, err := st.Track(ctx, repo, "products", adapter.ModeVersioned)
 	must(t, err)
 
-	return &fixture{ctx: ctx, pool: pool2, store: st, repo: repo, table: tbl}
+	return &fixture{ctx: ctx, pool: pool, store: st, repo: repo, table: tbl,
+		ad: ad, dialect: ad.Dialect()}
+}
+
+// swapMySQLDatabase rewrites the database name in a go-sql-driver DSN, which is
+// the path segment after the host: user:pass@tcp(host:port)/DBNAME?params
+func swapMySQLDatabase(dsn, name string) string {
+	dsn = strings.TrimPrefix(dsn, "mysql://")
+	slash := strings.LastIndex(dsn, "/")
+	if slash < 0 {
+		return dsn + "/" + name
+	}
+	tail := ""
+	if q := strings.Index(dsn[slash:], "?"); q >= 0 {
+		tail = dsn[slash+q:]
+	}
+	return dsn[:slash+1] + name + tail
 }
 
 func must(t *testing.T, err error) {
@@ -126,7 +169,7 @@ func (f *fixture) livePrice(t *testing.T, sku string) string {
 	t.Helper()
 	var s string
 	if err := f.pool.Direct().QueryRow(f.ctx,
-		`SELECT price::text FROM products WHERE sku=$1`, sku).Scan(&s); err != nil {
+		`SELECT `+f.asText("price")+` FROM products WHERE sku=$1`, sku).Scan(&s); err != nil {
 		t.Fatalf("live price: %v", err)
 	}
 	return s
@@ -142,24 +185,11 @@ func TestTrackBackfillsAndLeavesLiveTableAlone(t *testing.T) {
 	}
 	// No added columns, no triggers: the live table must stay a clean
 	// materialization of main@HEAD.
-	var extra int
-	must(t, f.pool.Direct().QueryRow(f.ctx, `
-		SELECT count(*) FROM pg_attribute a
-		  JOIN pg_class c ON c.oid=a.attrelid
-		  JOIN pg_namespace n ON n.oid=c.relnamespace
-		 WHERE c.relname='products' AND n.nspname=current_schema()
-		   AND a.attnum>0 AND NOT a.attisdropped`).Scan(&extra))
+	extra := f.liveColumnCount(t)
 	if extra != 5 {
 		t.Errorf("tracking added columns to the live table: %d columns, want 5", extra)
 	}
-	var triggers int
-	must(t, f.pool.Direct().QueryRow(f.ctx, `
-		SELECT count(*) FROM pg_trigger tg
-		  JOIN pg_class c ON c.oid=tg.tgrelid
-		  JOIN pg_namespace n ON n.oid=c.relnamespace
-		 WHERE c.relname='products' AND n.nspname=current_schema()
-		   AND NOT tg.tgisinternal`).Scan(&triggers))
-	if triggers != 0 {
+	if triggers := f.liveTriggerCount(t); triggers != 0 {
 		t.Errorf("tracking added %d triggers to the live table; the happy path must add none", triggers)
 	}
 
@@ -537,9 +567,10 @@ func TestUntrackLeavesTheLiveTable(t *testing.T) {
 		t.Errorf("untrack lost a committed value: price is %s, want 14.00", got)
 	}
 	var n int
-	must(t, f.pool.Direct().QueryRow(f.ctx,
-		`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-		  WHERE c.relname='datagit_v_products' AND n.nspname=current_schema()`).Scan(&n))
+	must(t, f.pool.Direct().QueryRow(f.ctx, `
+		SELECT count(*) FROM information_schema.tables
+		 WHERE table_schema = `+f.currentSchema()+`
+		   AND table_name = 'datagit_v_products'`).Scan(&n))
 	if n != 0 {
 		t.Error("untrack left the sidecar behind")
 	}
@@ -671,4 +702,72 @@ func TestExportRoundTripsTheEncoding(t *testing.T) {
 // eq builds an equality predicate on a text column.
 func eq(col core.ColID, v string) adapter.Expr {
 	return adapter.Compare{Col: col, Op: adapter.Eq, Value: core.Text(v)}
+}
+
+// liveColumnCount and liveTriggerCount read the engine's own catalogue, so the
+// §5.1 invariant is checked against what the database actually holds rather than
+// against DataGit's record of it. information_schema is the portable view of
+// both.
+func (f *fixture) liveColumnCount(t *testing.T) int {
+	t.Helper()
+	var n int
+	must(t, f.pool.Direct().QueryRow(f.ctx, `
+		SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema = `+f.currentSchema()+` AND table_name = 'products'`).Scan(&n))
+	return n
+}
+
+func (f *fixture) liveTriggerCount(t *testing.T) int {
+	t.Helper()
+	var n int
+	must(t, f.pool.Direct().QueryRow(f.ctx, `
+		SELECT count(*) FROM information_schema.triggers
+		 WHERE event_object_schema = `+f.currentSchema()+`
+		   AND event_object_table = 'products'`).Scan(&n))
+	return n
+}
+
+// currentSchema names the SQL expression for "the namespace this connection is
+// pointed at": a schema on PostgreSQL, a database on MySQL.
+func (f *fixture) currentSchema() string {
+	if f.dialect == adapter.MySQL {
+		return "DATABASE()"
+	}
+	return "current_schema()"
+}
+
+// boundName narrows products.name so it can carry a unique index.
+//
+// MySQL cannot index an unbounded TEXT column without a prefix length, and a
+// prefix index is a different constraint: it would make two names that share
+// their first N characters collide. Narrowing the column keeps the two engines
+// testing the SAME constraint.
+func (f *fixture) boundName(t *testing.T) {
+	t.Helper()
+	stmt := `ALTER TABLE products ALTER COLUMN name TYPE varchar(128)`
+	if f.dialect == adapter.MySQL {
+		stmt = `ALTER TABLE products MODIFY COLUMN name varchar(128)`
+	}
+	must(t, f.pool.Direct().Exec(f.ctx, stmt))
+}
+
+// dropSchema names the statement that removes a namespace on this engine.
+func (f *fixture) dropSchema(name string) string {
+	if f.dialect == adapter.MySQL {
+		return "DROP DATABASE IF EXISTS " + name
+	}
+	return "DROP SCHEMA IF EXISTS " + name + " CASCADE"
+}
+
+// asText renders a column as exact text.
+//
+// There is no spelling that means the same thing on both engines, which is why
+// this is a helper and not a constant. `CAST(x AS CHAR)` is unbounded text on
+// MySQL and character(1) on PostgreSQL -- it silently truncates "249.00" to "2"
+// there, which is how this helper came to exist.
+func (f *fixture) asText(col string) string {
+	if f.dialect == adapter.MySQL {
+		return "CAST(" + col + " AS CHAR)"
+	}
+	return col + "::text"
 }

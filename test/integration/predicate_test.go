@@ -125,6 +125,7 @@ func TestUpdateWhereOnBranchUsesResolvedRows(t *testing.T) {
 // it mid-merge with a partial result.
 func TestValidateMergeCatchesUniqueViolation(t *testing.T) {
 	f := setup(t)
+	f.boundName(t)
 	must(t, f.pool.Direct().Exec(f.ctx,
 		`CREATE UNIQUE INDEX products_name_uk ON products (name)`))
 
@@ -148,6 +149,7 @@ func TestValidateMergeCatchesUniqueViolation(t *testing.T) {
 // TestValidateMergeAllowsCleanChanges: validation must not cry wolf.
 func TestValidateMergeAllowsCleanChanges(t *testing.T) {
 	f := setup(t)
+	f.boundName(t)
 	must(t, f.pool.Direct().Exec(f.ctx,
 		`CREATE UNIQUE INDEX products_name_uk2 ON products (name)`))
 	changes := []store.Change{{

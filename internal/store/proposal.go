@@ -70,14 +70,29 @@ func (s *Store) CreateProposal(ctx context.Context, repo *Repo, from, into, titl
 	p := &Proposal{From: from, Into: into, Title: title, Description: description,
 		State: "open", CreatedBy: principal}
 	err := s.pool.InTx(ctx, func(tx adapter.Tx) error {
-		return tx.QueryRow(ctx,
-			`INSERT INTO datagit_proposal (repo_id, from_ref, into_ref, title, description, state, created_by)
-			 SELECT $1, f.id, i.id, $4, $5, 'open', $6
+		// created_at comes from the DATABASE clock, read here and inserted
+		// explicitly rather than left to a column default. A default would have to
+		// be read back, and RETURNING is PostgreSQL-only (§7.2, §4.3).
+		at, err := s.ad.Now(ctx, tx)
+		if err != nil {
+			return err
+		}
+		id, err := s.ad.InsertReturningID(ctx, tx,
+			`INSERT INTO datagit_proposal
+			   (repo_id, from_ref, into_ref, title, description, state, created_by, created_at)
+			 SELECT $1, f.id, i.id, $4, $5, 'open', $6, $7
 			   FROM datagit_ref f, datagit_ref i
 			  WHERE f.repo_id=$1 AND f.kind='branch' AND f.name=$2
-			    AND i.repo_id=$1 AND i.kind='branch' AND i.name=$3
-			 RETURNING id, created_at`,
-			repo.ID, from, into, title, description, principal).Scan(&p.ID, &p.CreatedAt)
+			    AND i.repo_id=$1 AND i.kind='branch' AND i.name=$3`,
+			repo.ID, from, into, title, description, principal, at)
+		if err != nil {
+			return err
+		}
+		if id == 0 {
+			return fmt.Errorf("branch %q or %q does not exist", from, into)
+		}
+		p.ID, p.CreatedAt = id, at
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create proposal: %w", err)
@@ -124,7 +139,7 @@ func (s *Store) LoadProposal(ctx context.Context, repo *Repo, id int64) (*Propos
 	var merge []byte
 	err := s.pool.Direct().QueryRow(ctx,
 		`SELECT f.name, i.name, p.title, p.description, p.state,
-		        coalesce(p.merge_commit, ''::bytea), p.created_by, p.created_at
+		        p.merge_commit, p.created_by, p.created_at
 		   FROM datagit_proposal p
 		   JOIN datagit_ref f ON f.id = p.from_ref
 		   JOIN datagit_ref i ON i.id = p.into_ref
@@ -330,8 +345,9 @@ func (s *Store) ListProposals(ctx context.Context, repo *Repo, states ...string)
 	       WHERE p.repo_id = $1`
 	args := []any{repo.ID}
 	if len(states) > 0 {
-		q += ` AND p.state = ANY($2)`
-		args = append(args, states)
+		cond, a := inList("p.state", states, len(args)+1)
+		q += ` AND ` + cond
+		args = append(args, a...)
 	}
 	q += ` ORDER BY p.id DESC`
 

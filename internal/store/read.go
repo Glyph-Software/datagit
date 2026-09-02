@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Glyph-Software/datagit/internal/adapter"
-	"github.com/Glyph-Software/datagit/internal/adapter/postgres"
+
 	"github.com/Glyph-Software/datagit/internal/catalog"
 	"github.com/Glyph-Software/datagit/internal/core"
 	"github.com/Glyph-Software/datagit/internal/hash"
@@ -501,7 +501,7 @@ func (s *Store) VerifyIntegrity(ctx context.Context, repo *Repo, branch string) 
 	defer rows.Close()
 	for rows.Next() {
 		var id, cd, sd []byte
-		var parents [][]byte
+		var parents []byte
 		var author, msg, ref, integrity string
 		var at time.Time
 		var seq int64
@@ -515,10 +515,8 @@ func (s *Store) VerifyIntegrity(ctx context.Context, repo *Repo, branch string) 
 			Message: msg, ExternalRef: ref}
 		copy(in.ChangeDigest[:], cd)
 		copy(in.SchemaDigest[:], sd)
-		for _, p := range parents {
-			var d hash.Digest
-			copy(d[:], p)
-			in.Parents = append(in.Parents, d)
+		if in.Parents, err = decodeDigests(parents); err != nil {
+			return err
 		}
 		var stored hash.Digest
 		copy(stored[:], id)
@@ -564,7 +562,7 @@ func bytesToMask(b []byte) core.ColMask {
 	return m
 }
 
-var _ = postgres.MaxSeq
+var _ = adapter.MaxSeq
 
 // ListTables returns every tracked table in a repository.
 func (s *Store) ListTables(ctx context.Context, repo *Repo) ([]*Table, error) {

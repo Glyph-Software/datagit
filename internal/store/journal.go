@@ -20,9 +20,9 @@ func (s *Store) Journal() *Journal { return &Journal{s: s} }
 func (j *Journal) Begin(ctx context.Context, plan *adapter.MigrationPlan) error {
 	return j.s.pool.InTx(ctx, func(tx adapter.Tx) error {
 		for _, op := range plan.Ops {
-			if err := tx.Exec(ctx,
-				`INSERT INTO datagit_migration_journal (plan_id, ordinal, kind, sql_text)
-				 VALUES ($1,$2,$3,$4) ON CONFLICT (plan_id, ordinal) DO NOTHING`,
+			if err := tx.Exec(ctx, j.s.ad.InsertOnConflict("datagit_migration_journal",
+				[]string{"plan_id", "ordinal", "kind", "sql_text"},
+				"VALUES ($1,$2,$3,$4)", []string{"plan_id", "ordinal"}, nil),
 				int64(plan.TableID), op.Ordinal, op.Kind, op.SQL); err != nil {
 				return fmt.Errorf("journal op %d: %w", op.Ordinal, err)
 			}

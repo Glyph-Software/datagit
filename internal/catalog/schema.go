@@ -11,8 +11,8 @@ const ControlSchemaVersion = 1
 // journalled state machine as user migrations (§17.2, dogfooded from M1).
 const ControlSchema = `
 CREATE TABLE IF NOT EXISTS datagit_meta (
-    key   text PRIMARY KEY,
-    value text NOT NULL
+    meta_key   text PRIMARY KEY,
+    meta_value text NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS datagit_repo (
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS datagit_table (
     repo_id        uuid NOT NULL REFERENCES datagit_repo(id) ON DELETE CASCADE,
     physical_name  text NOT NULL,
     mode           text NOT NULL CHECK (mode IN ('audit','versioned')),
-    pk_columns     integer[] NOT NULL,
+    pk_columns     text NOT NULL,        -- JSON array; portable, §4.3
     state          text NOT NULL CHECK (state IN ('backfilling','active','paused','untracking')),
     tracked_at     timestamptz NOT NULL DEFAULT now(),
     UNIQUE (repo_id, physical_name)
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS datagit_ref (
     -- CAPTURED AT FORK. It must not be re-derived from ancestors' live fork
     -- points: UpdateFromParent advances a fork point, and a descendant that
     -- rebuilt its chain would silently inherit rows it never asked for.
-    chain         jsonb NOT NULL DEFAULT '[]'::jsonb,
+    chain         text NOT NULL DEFAULT '[]',
 
     protected     boolean NOT NULL DEFAULT false,
     min_approvals smallint NOT NULL DEFAULT 0,
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS datagit_commit (
     repo_id       uuid   NOT NULL REFERENCES datagit_repo(id) ON DELETE CASCADE,
     branch_id     uuid   NOT NULL,
     seq           bigint NOT NULL,
-    parent_ids    bytea[] NOT NULL,
+    parent_ids    text   NOT NULL,       -- JSON array of hex digests, §4.3
     author        text   NOT NULL,      -- the authenticated principal, §15.2
     author_at     timestamptz NOT NULL,
     committer     text   NOT NULL,
@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS datagit_commit (
 
     -- Phase 0 finding F1, again: the chain in force when this commit was made,
     -- so historical reads resolve against the world as it was, not as it became.
-    chain         jsonb  NOT NULL DEFAULT '[]'::jsonb,
+    chain         text   NOT NULL DEFAULT '[]',
 
     UNIQUE (repo_id, branch_id, seq)
 );
@@ -124,7 +124,7 @@ CREATE INDEX IF NOT EXISTS datagit_session_lease ON datagit_session (lease_until
 -- Idempotency keys, so a client retry after a lost response cannot double-apply
 -- a commit (DESIGN.md §16.2).
 CREATE TABLE IF NOT EXISTS datagit_idempotency (
-    key          text PRIMARY KEY,
+    idem_key     text PRIMARY KEY,
     principal    text NOT NULL,
     request_hash bytea NOT NULL,
     response     bytea NOT NULL,

@@ -103,7 +103,7 @@ func (s *Store) CreateTag(ctx context.Context, repo *Repo, name string, at hash.
 func (s *Store) ListRefs(ctx context.Context, repo *Repo) ([]Ref, error) {
 	rows, err := s.pool.Direct().Query(ctx,
 		`SELECT r.id, r.kind, r.name, r.head_commit, r.head_seq,
-		        coalesce(p.name,''), coalesce(r.fork_commit,''::bytea),
+		        coalesce(p.name,''), r.fork_commit,
 		        coalesce(r.fork_seq,0), r.chain, r.protected
 		   FROM datagit_ref r LEFT JOIN datagit_ref p ON p.id = r.parent_ref
 		  WHERE r.repo_id = $1 ORDER BY r.kind, r.name`, repo.ID)
@@ -161,18 +161,12 @@ func (s *Store) DeleteBranch(ctx context.Context, repo *Repo, name string) error
 func (s *Store) MergeBase(ctx context.Context, repo *Repo, a, b hash.Digest) ([]hash.Digest, error) {
 	tx := s.pool.Direct()
 	parents := func(d hash.Digest) ([]hash.Digest, error) {
-		var ps [][]byte
+		var ps []byte
 		if err := tx.QueryRow(ctx, `SELECT parent_ids FROM datagit_commit WHERE id=$1`, d[:]).
 			Scan(&ps); err != nil {
 			return nil, fmt.Errorf("unknown commit %s: %w", d.Short(), err)
 		}
-		out := make([]hash.Digest, 0, len(ps))
-		for _, p := range ps {
-			var pd hash.Digest
-			copy(pd[:], p)
-			out = append(out, pd)
-		}
-		return out, nil
+		return decodeDigests(ps)
 	}
 	reach := func(start hash.Digest) (map[hash.Digest]bool, error) {
 		seen := map[hash.Digest]bool{start: true}

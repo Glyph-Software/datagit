@@ -33,7 +33,8 @@ func Open(ctx context.Context, dsn string) (*Pool, error) {
 	return &Pool{p: p}, nil
 }
 
-func (p *Pool) Close() { p.p.Close() }
+func (p *Pool) Close()                   { p.p.Close() }
+func (p *Pool) Dialect() adapter.Dialect { return adapter.PostgreSQL }
 
 // InTx runs fn inside a transaction, committing on success and rolling back on
 // any error or panic.
@@ -50,6 +51,14 @@ type Tx struct{ tx pgx.Tx }
 func (t *Tx) Exec(ctx context.Context, sql string, args ...any) error {
 	_, err := t.tx.Exec(ctx, sql, args...)
 	return err
+}
+
+func (t *Tx) ExecCount(ctx context.Context, sql string, args ...any) (int64, error) {
+	tag, err := t.tx.Exec(ctx, sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (t *Tx) Query(ctx context.Context, sql string, args ...any) (adapter.Rows, error) {
@@ -69,6 +78,14 @@ type poolTx struct{ p *pgxpool.Pool }
 func (t *poolTx) Exec(ctx context.Context, sql string, args ...any) error {
 	_, err := t.p.Exec(ctx, sql, args...)
 	return err
+}
+
+func (t *poolTx) ExecCount(ctx context.Context, sql string, args ...any) (int64, error) {
+	tag, err := t.p.Exec(ctx, sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (t *poolTx) Query(ctx context.Context, sql string, args ...any) (adapter.Rows, error) {

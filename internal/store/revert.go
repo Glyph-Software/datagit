@@ -31,7 +31,7 @@ func (s *Store) Revert(ctx context.Context, repo *Repo, t *Table, branch string,
 
 	tx := s.pool.Direct()
 	var seq int64
-	var parents [][]byte
+	var parents []byte
 	if err := tx.QueryRow(ctx,
 		`SELECT seq, parent_ids FROM datagit_commit WHERE id = $1`, target[:]).
 		Scan(&seq, &parents); err != nil {
@@ -187,7 +187,7 @@ func (s *Store) Export(ctx context.Context, repo *Repo, t *Table, branch string,
 	}
 	for commits.Next() {
 		var id []byte
-		var parents [][]byte
+		var parents []byte
 		var e exportCommit
 		var at time.Time
 		if err := commits.Scan(&id, &e.Seq, &parents, &e.Author, &at,
@@ -196,8 +196,13 @@ func (s *Store) Export(ctx context.Context, repo *Repo, t *Table, branch string,
 			return err
 		}
 		e.Kind, e.ID, e.CommittedAt = "commit", hexs(id), at
-		for _, p := range parents {
-			e.Parents = append(e.Parents, hexs(p))
+		ps, err := decodeDigests(parents)
+		if err != nil {
+			commits.Close()
+			return err
+		}
+		for _, p := range ps {
+			e.Parents = append(e.Parents, hexs(p[:]))
 		}
 		if err := enc.Encode(e); err != nil {
 			commits.Close()

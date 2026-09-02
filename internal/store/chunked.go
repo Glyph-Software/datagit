@@ -102,7 +102,7 @@ func (s *Store) ApplyChunked(ctx context.Context, repo *Repo, t *Table, branch s
 
 func (s *Store) applyLiveChunk(ctx context.Context, repo *Repo, t *Table, branch string, chunk []Change) error {
 	return s.pool.InTx(ctx, func(tx adapter.Tx) error {
-		if err := MarkWriter(ctx, tx); err != nil {
+		if err := s.MarkWriter(ctx, tx); err != nil {
 			return err
 		}
 		branchID, _, _, _, err := s.loadRef(ctx, tx, repo, branch)

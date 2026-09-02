@@ -407,42 +407,25 @@ type uniqueIndex struct {
 }
 
 func (s *Store) uniqueIndexes(ctx context.Context, t *Table) ([]uniqueIndex, error) {
-	rows, err := s.pool.Direct().Query(ctx, `
-		SELECT i.relname, array_agg(a.attname ORDER BY k.ord)
-		  FROM pg_index x
-		  JOIN pg_class c ON c.oid = x.indrelid
-		  JOIN pg_class i ON i.oid = x.indexrelid
-		  JOIN pg_namespace n ON n.oid = c.relnamespace
-		  CROSS JOIN LATERAL unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord)
-		  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-		 WHERE c.relname = $1 AND n.nspname = current_schema()
-		   AND x.indisunique AND NOT x.indisprimary
-		 GROUP BY i.relname`, t.Physical)
+	idx, err := s.ad.UniqueIndexes(ctx, s.pool.Direct(), t.Physical)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	byName := map[string]core.ColID{}
 	for _, c := range t.Columns {
 		byName[c.Name] = c.ID
 	}
-	var out []uniqueIndex
-	for rows.Next() {
-		var u uniqueIndex
-		var names []string
-		if err := rows.Scan(&u.Name, &names); err != nil {
-			return nil, err
-		}
-		for _, n := range names {
+	out := make([]uniqueIndex, 0, len(idx))
+	for _, i := range idx {
+		u := uniqueIndex{Name: i.Name}
+		for _, n := range i.Cols {
 			if id, ok := byName[n]; ok {
 				u.Cols = append(u.Cols, id)
 			}
 		}
-		if len(u.Cols) == len(names) {
-			out = append(out, u)
-		}
+		out = append(out, u)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func mustChain(ctx context.Context, s *Store, repo *Repo, branch string) []adapter.Segment {

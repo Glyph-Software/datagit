@@ -90,43 +90,80 @@ func (s *Store) Prune(ctx context.Context, repo *Repo, t *Table, p RetentionPoli
 
 		// For each key, extend the newest surviving old version back over the gap,
 		// then delete the versions it now covers.
-		if err := tx.Exec(ctx, fmt.Sprintf(`
-			WITH doomed AS (
-			  SELECT %s, min(seq_from) AS lo, max(seq_to) AS hi
-			    FROM %s
-			   WHERE branch_id = $1 AND session_id IS NULL
-			     AND seq_to <> %d AND seq_to <= $2
-			   GROUP BY %s
-			  HAVING count(*) > 1
-			)
-			UPDATE %s v SET seq_to = d.hi
-			  FROM doomed d
-			 WHERE v.branch_id = $1 AND v.session_id IS NULL
-			   AND v.seq_from = d.lo`,
-			pkList, quote(catalog.SidecarTable(t.Physical)), MaxSeqValue, pkList,
-			quote(catalog.SidecarTable(t.Physical))), branchID, cutoffSeq); err != nil {
+		//
+		// This is done as select-then-write rather than as one data-modifying
+		// statement, for two reasons that are both engine differences, not taste.
+		// PostgreSQL's `UPDATE ... FROM cte` and `DELETE ... RETURNING` inside a
+		// CTE have no MySQL equivalent; and MySQL refuses (error 1093) a subquery
+		// that reads the same table a DELETE is targeting, which the coverage test
+		// below has to do. Reading the doomed intervals first sidesteps both and
+		// bounds the work explicitly, which a maintenance path wants anyway.
+		type span struct {
+			pk     []any
+			lo, hi int64
+		}
+		var doomed []span
+		rows, err := tx.Query(ctx, fmt.Sprintf(`
+			SELECT %s, min(seq_from) AS lo, max(seq_to) AS hi
+			  FROM %s
+			 WHERE branch_id = $1 AND session_id IS NULL
+			   AND seq_to <> %d AND seq_to <= $2
+			 GROUP BY %s
+			HAVING count(*) > 1`,
+			pkList, quote(catalog.SidecarTable(t.Physical)), MaxSeqValue, pkList),
+			branchID, cutoffSeq)
+		if err != nil {
 			return fmt.Errorf("thin history: %w", err)
 		}
+		for rows.Next() {
+			sp := span{pk: make([]any, len(t.PKColumns))}
+			dest := make([]any, 0, len(t.PKColumns)+2)
+			for i := range sp.pk {
+				dest = append(dest, &sp.pk[i])
+			}
+			dest = append(dest, &sp.lo, &sp.hi)
+			if err := rows.Scan(dest...); err != nil {
+				rows.Close()
+				return err
+			}
+			doomed = append(doomed, sp)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
 
-		// Now delete the covered versions.
 		var removed int
-		if err := tx.QueryRow(ctx, fmt.Sprintf(`
-			WITH deleted AS (
-			  DELETE FROM %s v
-			   WHERE v.branch_id = $1 AND v.session_id IS NULL
-			     AND v.seq_to <> %d AND v.seq_to <= $2
-			     AND EXISTS (
-			       SELECT 1 FROM %s o
-			        WHERE o.branch_id = v.branch_id
-			          AND o.seq_from < v.seq_from AND o.seq_to >= v.seq_to
-			          AND %s
-			     )
-			  RETURNING 1
-			) SELECT count(*) FROM deleted`,
-			quote(catalog.SidecarTable(t.Physical)), MaxSeqValue,
-			quote(catalog.SidecarTable(t.Physical)), joinPKEq(t, "o", "v")),
-			branchID, cutoffSeq).Scan(&removed); err != nil {
-			return fmt.Errorf("prune history: %w", err)
+		for _, sp := range doomed {
+			pkEq := make([]string, len(t.PKColumns))
+			for i, id := range t.PKColumns {
+				pkEq[i] = fmt.Sprintf("%s = $%d",
+					quote(catalog.SidecarColumn(uint32(id))), i+3)
+			}
+			where := strings.Join(pkEq, " AND ")
+
+			// Extend the oldest version in the run to cover the whole span.
+			args := append([]any{branchID, sp.lo}, sp.pk...)
+			if err := tx.Exec(ctx, fmt.Sprintf(
+				`UPDATE %s SET seq_to = $%d
+				  WHERE branch_id = $1 AND session_id IS NULL AND seq_from = $2 AND %s`,
+				quote(catalog.SidecarTable(t.Physical)), len(args)+1, where),
+				append(args, sp.hi)...); err != nil {
+				return fmt.Errorf("thin history: %w", err)
+			}
+
+			// Delete every version the extended one now covers. seq_from > lo
+			// spares the extended version itself.
+			n, err := tx.ExecCount(ctx, fmt.Sprintf(
+				`DELETE FROM %s
+				  WHERE branch_id = $1 AND session_id IS NULL
+				    AND seq_from > $2 AND seq_to <> %d AND seq_to <= $%d AND %s`,
+				quote(catalog.SidecarTable(t.Physical)), MaxSeqValue, len(args)+1, where),
+				append(args, cutoffSeq)...)
+			if err != nil {
+				return fmt.Errorf("prune history: %w", err)
+			}
+			removed += int(n)
 		}
 		rep.VersionsRemoved = removed
 		rep.Thinned = removed
@@ -231,14 +268,13 @@ func (s *Store) GC(ctx context.Context, repo *Repo) (*GCReport, error) {
 		rows.Close()
 
 		for _, id := range orphans {
-			var removed int
-			if err := s.pool.Direct().QueryRow(ctx, fmt.Sprintf(
-				`WITH d AS (DELETE FROM %s WHERE branch_id=$1 RETURNING 1)
-				 SELECT count(*) FROM d`,
-				quote(catalog.SidecarTable(t.Physical))), id).Scan(&removed); err != nil {
+			n, err := s.pool.Direct().ExecCount(ctx, fmt.Sprintf(
+				`DELETE FROM %s WHERE branch_id=$1`,
+				quote(catalog.SidecarTable(t.Physical))), id)
+			if err != nil {
 				return nil, err
 			}
-			rep.OrphanVersions += removed
+			rep.OrphanVersions += int(n)
 		}
 	}
 	return rep, nil
@@ -298,13 +334,13 @@ func (s *Store) Purge(ctx context.Context, repo *Repo, t *Table, pk core.PK, rea
 		}
 		rows.Close()
 
-		var removed int
-		if err := tx.QueryRow(ctx, fmt.Sprintf(
-			`WITH d AS (DELETE FROM %s WHERE %s RETURNING 1) SELECT count(*) FROM d`,
-			quote(catalog.SidecarTable(t.Physical)), where), args...).Scan(&removed); err != nil {
+		removed, err := tx.ExecCount(ctx, fmt.Sprintf(
+			`DELETE FROM %s WHERE %s`,
+			quote(catalog.SidecarTable(t.Physical)), where), args...)
+		if err != nil {
 			return fmt.Errorf("purge versions: %w", err)
 		}
-		rec.VersionsRemoved = removed
+		rec.VersionsRemoved = int(removed)
 
 		// The live row goes too.
 		liveWhere, liveArgs := pkWhere(t, vals, 1)

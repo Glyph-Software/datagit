@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -225,14 +226,19 @@ func TestMergeCommitRecordsBothParents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var n int
+	// parent_ids is a JSON array, which both engines store as text (§4.3).
+	var raw string
 	if err := f.pool.Direct().QueryRow(f.ctx,
-		`SELECT array_length(parent_ids, 1) FROM datagit_commit WHERE id=$1`,
-		res.Commit[:]).Scan(&n); err != nil {
+		`SELECT parent_ids FROM datagit_commit WHERE id=$1`,
+		res.Commit[:]).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Errorf("merge commit has %d parents, want 2", n)
+	var parents []string
+	if err := json.Unmarshal([]byte(raw), &parents); err != nil {
+		t.Fatalf("parent_ids %q is not a JSON array: %v", raw, err)
+	}
+	if len(parents) != 2 {
+		t.Errorf("merge commit has %d parents, want 2", len(parents))
 	}
 }
 
@@ -304,15 +310,14 @@ func TestConflictsArePersisted(t *testing.T) {
 		t.Fatal("expected conflicts")
 	}
 
-	var pid int64
-	if err := f.pool.Direct().QueryRow(f.ctx,
-		`INSERT INTO datagit_proposal (repo_id, from_ref, into_ref, title, state, created_by)
-		 SELECT $1, fr.id, ir.id, 'test', 'conflicted', $2
-		   FROM datagit_ref fr, datagit_ref ir
-		  WHERE fr.repo_id=$1 AND fr.name='cheap' AND ir.repo_id=$1 AND ir.name='main'
-		 RETURNING id`, f.repo.ID, principal).Scan(&pid); err != nil {
+	// Through the store rather than raw SQL: generated-key retrieval is one of
+	// the places the engines genuinely differ, and the store already owns it.
+	prop, err := f.store.CreateProposal(f.ctx, f.repo, "cheap", store.DefaultBranch,
+		"test", "", principal)
+	if err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
+	pid := prop.ID
 	if err := f.store.SaveConflicts(f.ctx, pid, f.table, res.Conflicts); err != nil {
 		t.Fatalf("save conflicts: %v", err)
 	}

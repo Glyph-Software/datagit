@@ -231,14 +231,7 @@ func TestOpenModeAddsNoTriggers(t *testing.T) {
 	if err := f.store.SetWriteMode(f.ctx, f.table, store.ModeOpen); err != nil {
 		t.Fatal(err)
 	}
-	var n int
-	must(t, f.pool.Direct().QueryRow(f.ctx, `
-		SELECT count(*) FROM pg_trigger tg
-		  JOIN pg_class c ON c.oid = tg.tgrelid
-		  JOIN pg_namespace ns ON ns.oid = c.relnamespace
-		 WHERE c.relname='products' AND ns.nspname=current_schema()
-		   AND NOT tg.tgisinternal`).Scan(&n))
-	if n != 0 {
+	if n := f.liveTriggerCount(t); n != 0 {
 		t.Errorf("open mode left %d trigger(s) on the live table; the happy path must add none", n)
 	}
 }

@@ -13,28 +13,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/Glyph-Software/datagit/internal/adapter"
-	"github.com/Glyph-Software/datagit/internal/adapter/postgres"
+
 	"github.com/Glyph-Software/datagit/internal/catalog"
 	"github.com/Glyph-Software/datagit/internal/core"
+	"github.com/Glyph-Software/datagit/internal/db"
 	"github.com/Glyph-Software/datagit/internal/hash"
-	"github.com/Glyph-Software/datagit/internal/pg"
 )
 
 // DefaultBranch is the branch whose live table is the materialization.
 const DefaultBranch = "main"
 
 type Store struct {
-	pool *pg.Pool
+	pool db.Pool
 	ad   adapter.Adapter
 }
 
-func New(pool *pg.Pool, ad adapter.Adapter) *Store { return &Store{pool: pool, ad: ad} }
+func New(pool db.Pool, ad adapter.Adapter) *Store { return &Store{pool: pool, ad: ad} }
 
 // Repo identifies a repository.
 type Repo struct {
@@ -85,12 +86,12 @@ func (t *Table) Column(id core.ColID) (adapter.Column, bool) {
 // Idempotent, so it is safe to run on every startup.
 func (s *Store) InitControlSchema(ctx context.Context) error {
 	return s.pool.InTx(ctx, func(tx adapter.Tx) error {
-		if err := tx.Exec(ctx, catalog.ControlSchema); err != nil {
+		if err := tx.Exec(ctx, catalog.ControlSchemaFor(s.ad.Dialect())); err != nil {
 			return fmt.Errorf("control schema: %w", err)
 		}
-		return tx.Exec(ctx,
-			`INSERT INTO datagit_meta (key, value) VALUES ('control_schema_version', $1)
-			 ON CONFLICT (key) DO NOTHING`,
+		return tx.Exec(ctx, s.ad.InsertOnConflict("datagit_meta",
+			[]string{"meta_key", "meta_value"},
+			"VALUES ('control_schema_version', $1)", []string{"meta_key"}, nil),
 			fmt.Sprint(catalog.ControlSchemaVersion))
 	})
 }
@@ -98,11 +99,17 @@ func (s *Store) InitControlSchema(ctx context.Context) error {
 // CheckControlSchema refuses to run against a newer control schema than this
 // build understands (§17.2).
 func (s *Store) CheckControlSchema(ctx context.Context) error {
-	var v int
+	// Scanned as text and parsed here rather than cast in SQL: the cast spelling
+	// differs per engine and the parse does not.
+	var raw string
 	err := s.pool.Direct().QueryRow(ctx,
-		`SELECT value::int FROM datagit_meta WHERE key = 'control_schema_version'`).Scan(&v)
+		`SELECT meta_value FROM datagit_meta WHERE meta_key = 'control_schema_version'`).Scan(&raw)
 	if err != nil {
 		return fmt.Errorf("control schema version unreadable (run repo init?): %w", err)
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("control schema version %q is not a number: %w", raw, err)
 	}
 	if v > catalog.ControlSchemaVersion {
 		return fmt.Errorf(
@@ -173,7 +180,7 @@ func (s *Store) LookupRepo(ctx context.Context, name string) (*Repo, error) {
 func (s *Store) Track(ctx context.Context, repo *Repo, physical string, mode adapter.Mode) (*Table, error) {
 	var t *Table
 	err := s.pool.InTx(ctx, func(tx adapter.Tx) error {
-		cols, pk, err := introspect(ctx, tx, physical)
+		cols, pk, err := s.ad.Introspect(ctx, tx, physical)
 		if err != nil {
 			return err
 		}
@@ -184,7 +191,7 @@ func (s *Store) Track(ctx context.Context, repo *Repo, physical string, mode ada
 		}
 		var unsupported []string
 		for _, c := range cols {
-			if _, ok := postgres.KindFor(c.SQLType); !ok {
+			if _, ok := s.ad.KindFor(c.SQLType); !ok {
 				unsupported = append(unsupported, fmt.Sprintf("%s (%s)", c.Name, c.SQLType))
 			}
 		}
@@ -198,16 +205,14 @@ func (s *Store) Track(ctx context.Context, repo *Repo, physical string, mode ada
 		t = &Table{RepoID: repo.ID, Physical: physical, Mode: mode, State: "backfilling",
 			Columns: cols, PKColumns: pk}
 
-		pkInts := make([]int32, len(pk))
-		for i, p := range pk {
-			pkInts[i] = int32(p)
-		}
-		if err := tx.QueryRow(ctx,
+		id, err := s.ad.InsertReturningID(ctx, tx,
 			`INSERT INTO datagit_table (repo_id, physical_name, mode, pk_columns, state)
-			 VALUES ($1,$2,$3,$4,'backfilling') RETURNING id`,
-			repo.ID, physical, string(mode), pkInts).Scan(&t.ID); err != nil {
+			 VALUES ($1,$2,$3,$4,'backfilling')`,
+			repo.ID, physical, string(mode), encodeColIDs(pk))
+		if err != nil {
 			return fmt.Errorf("register table: %w", err)
 		}
+		t.ID = id
 		for i, c := range t.Columns {
 			if err := tx.Exec(ctx,
 				`INSERT INTO datagit_column (table_id, id, name, sql_type, kind, nullable, is_pk, ordinal)
@@ -242,19 +247,19 @@ func (s *Store) backfill(ctx context.Context, repo *Repo, t *Table) error {
 		}
 
 		src := make([]string, 0, len(t.Columns))
-		dst := make([]string, 0, len(t.Columns))
+		dstNames := make([]string, 0, len(t.Columns))
 		for _, c := range t.Columns {
 			src = append(src, quote(c.Name))
-			dst = append(dst, quote(catalog.SidecarColumn(uint32(c.ID))))
+			dstNames = append(dstNames, catalog.SidecarColumn(uint32(c.ID)))
 		}
 		// Chunking and rate limiting belong here for large tables; the single
 		// statement is correct and adequate at M1 scale.
-		sql := fmt.Sprintf(
-			`INSERT INTO %s (branch_id, seq_from, seq_to, op, commit_id, changed_cols, %s)
-			 SELECT $1, $2, %d, %d, $3, $4, %s FROM %s
-			 ON CONFLICT DO NOTHING`,
-			quote(catalog.SidecarTable(t.Physical)), strings.Join(dst, ", "),
-			postgres.MaxSeq, core.OpInsert, strings.Join(src, ", "), quote(t.Physical))
+		cols := append([]string{"branch_id", "seq_from", "seq_to", "op", "commit_id",
+			"changed_cols"}, dstNames...)
+		sql := s.ad.InsertOnConflict(catalog.SidecarTable(t.Physical), cols,
+			fmt.Sprintf("SELECT $1, $2, %d, %d, $3, $4, %s FROM %s",
+				adapter.MaxSeq, core.OpInsert, strings.Join(src, ", "), quote(t.Physical)),
+			nil, nil)
 		if err := tx.Exec(ctx, sql, repo.DefaultBranch, headSeq, head, []byte{}); err != nil {
 			return fmt.Errorf("backfill: %w", err)
 		}
@@ -262,19 +267,19 @@ func (s *Store) backfill(ctx context.Context, repo *Repo, t *Table) error {
 	})
 }
 
-func (s *Store) LoadTable(ctx context.Context, repo *Repo, physical string) (*Table, error) {
-	t := &Table{RepoID: repo.ID, Physical: physical}
+func (s *Store) LoadTable(ctx context.Context, repo *Repo, physical string) (t *Table, err error) {
+	t = &Table{RepoID: repo.ID, Physical: physical}
 	tx := s.pool.Direct()
-	var pkInts []int32
+	var pkRaw []byte
 	var mode string
 	if err := tx.QueryRow(ctx,
 		`SELECT id, mode, pk_columns, state FROM datagit_table WHERE repo_id=$1 AND physical_name=$2`,
-		repo.ID, physical).Scan(&t.ID, &mode, &pkInts, &t.State); err != nil {
+		repo.ID, physical).Scan(&t.ID, &mode, &pkRaw, &t.State); err != nil {
 		return nil, fmt.Errorf("table %q is not tracked: %w", physical, err)
 	}
 	t.Mode = adapter.Mode(mode)
-	for _, p := range pkInts {
-		t.PKColumns = append(t.PKColumns, core.ColID(p))
+	if t.PKColumns, err = decodeColIDs(pkRaw); err != nil {
+		return nil, err
 	}
 	rows, err := tx.Query(ctx,
 		`SELECT id, name, sql_type, kind, nullable FROM datagit_column
@@ -341,7 +346,7 @@ func (s *Store) Commit(ctx context.Context, req CommitRequest) (*CommitResult, e
 	err := s.pool.InTx(ctx, func(tx adapter.Tx) error {
 		// Identify this transaction as DataGit's, so a guarded table's trigger
 		// lets it through (§6.3).
-		if err := MarkWriter(ctx, tx); err != nil {
+		if err := s.MarkWriter(ctx, tx); err != nil {
 			return err
 		}
 		branchID, headCommit, headSeq, chain, err := s.loadRef(ctx, tx, req.Repo, req.Branch)
@@ -474,7 +479,7 @@ func (s *Store) applyLive(ctx context.Context, tx adapter.Tx, t *Table, ch Chang
 	ph := make([]string, 0, len(t.Columns))
 	args := make([]any, 0, len(t.Columns))
 	for i, c := range t.Columns {
-		cols = append(cols, quote(c.Name))
+		cols = append(cols, c.Name)
 		ph = append(ph, fmt.Sprintf("$%d", i+1))
 		v, err := bind(ch.Row.Get(c.ID))
 		if err != nil {
@@ -485,18 +490,17 @@ func (s *Store) applyLive(ctx context.Context, tx adapter.Tx, t *Table, ch Chang
 	pkNames := make([]string, 0, len(t.PKColumns))
 	for _, id := range t.PKColumns {
 		c, _ := t.Column(id)
-		pkNames = append(pkNames, quote(c.Name))
+		pkNames = append(pkNames, c.Name)
 	}
-	sets := make([]string, 0, len(t.Columns))
+	updates := make([]string, 0, len(t.Columns))
 	for _, c := range t.Columns {
 		if containsCol(t.PKColumns, c.ID) {
 			continue
 		}
-		sets = append(sets, fmt.Sprintf("%s = EXCLUDED.%s", quote(c.Name), quote(c.Name)))
+		updates = append(updates, c.Name)
 	}
-	sql := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s`,
-		quote(t.Physical), strings.Join(cols, ", "), strings.Join(ph, ", "),
-		strings.Join(pkNames, ", "), strings.Join(sets, ", "))
+	sql := s.ad.InsertOnConflict(t.Physical, cols,
+		"VALUES ("+strings.Join(ph, ", ")+")", pkNames, updates)
 	return tx.Exec(ctx, sql, args...)
 }
 
@@ -510,13 +514,13 @@ func (s *Store) closeOpen(ctx context.Context, tx adapter.Tx, t *Table, branch u
 	return tx.Exec(ctx, fmt.Sprintf(
 		`UPDATE %s SET seq_to = $1 WHERE branch_id = $2 AND session_id IS NULL
 		   AND seq_to = %d AND %s`,
-		quote(catalog.SidecarTable(t.Physical)), postgres.MaxSeq, where), args...)
+		quote(catalog.SidecarTable(t.Physical)), adapter.MaxSeq, where), args...)
 }
 
 func (s *Store) insertVersion(ctx context.Context, tx adapter.Tx, t *Table,
 	branch uuid.UUID, seq int64, op core.Op, ch Change, mask core.ColMask) error {
 	cols := []string{"branch_id", "seq_from", "seq_to", "op", "commit_id", "changed_cols"}
-	args := []any{branch, seq, postgres.MaxSeq, int16(op), []byte{}, maskBytes(mask)}
+	args := []any{branch, seq, adapter.MaxSeq, int16(op), []byte{}, maskBytes(mask)}
 	for _, c := range t.Columns {
 		cols = append(cols, catalog.SidecarColumn(uint32(c.ID)))
 		var v any
@@ -605,15 +609,11 @@ func schemaDigest(t *Table) hash.Digest {
 func insertCommit(ctx context.Context, tx adapter.Tx, repo, branch uuid.UUID, seq int64,
 	id hash.Digest, parents []hash.Digest, author string, at time.Time,
 	msg, ref string, cd, sd hash.Digest, chain []adapter.Segment) error {
-	ps := make([][]byte, 0, len(parents))
-	for _, p := range parents {
-		pp := p
-		ps = append(ps, pp[:])
-	}
 	return tx.Exec(ctx,
 		`INSERT INTO datagit_commit
 		   (id, repo_id, branch_id, seq, parent_ids, author, author_at, committer,
 		    committed_at, message, external_ref, change_digest, schema_digest, chain)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$6,$7,$8,$9,$10,$11,$12)`,
-		id[:], repo, branch, seq, ps, author, at, msg, ref, cd[:], sd[:], mustJSON(chain))
+		id[:], repo, branch, seq, encodeDigests(parents), author, at, msg, ref,
+		cd[:], sd[:], mustJSON(chain))
 }

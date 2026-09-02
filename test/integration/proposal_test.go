@@ -164,12 +164,14 @@ func TestMaterializeGivesRealTables(t *testing.T) {
 	f := setup(t)
 	f.branchWith(t, "q4", "TENT-4P", "outdoor", "268.92")
 
-	schema := fmt.Sprintf("mat_%d", time.Now().UnixNano()%1000000)
+	// The it_ prefix keeps the materialization inside the namespace the test
+	// user is granted, the same as any other test-created schema.
+	schema := fmt.Sprintf("it_mat_%d", time.Now().UnixNano()%1000000)
 	if err := f.store.Materialize(f.ctx, f.repo, "q4", schema); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = f.pool.Direct().Exec(f.ctx, fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema))
+		_ = f.pool.Direct().Exec(f.ctx, f.dropSchema(schema))
 	})
 
 	// The result is an ordinary table: real column names, a primary key, and it
@@ -177,7 +179,7 @@ func TestMaterializeGivesRealTables(t *testing.T) {
 	var n int
 	var maxPrice string
 	if err := f.pool.Direct().QueryRow(f.ctx,
-		fmt.Sprintf(`SELECT count(*), max(price)::text FROM %q.products`, schema)).
+		fmt.Sprintf(`SELECT count(*), %s FROM "%s".products`, f.asText("max(price)"), schema)).
 		Scan(&n, &maxPrice); err != nil {
 		t.Fatalf("query the materialization: %v", err)
 	}

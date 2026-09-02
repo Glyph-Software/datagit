@@ -1,5 +1,6 @@
 # Development databases for DataGit.
-# PostgreSQL 16 and 17 per PLAN.md M0.2. MySQL 8.4 is added in M5 (v1.1).
+# PostgreSQL 16 and 17 and MySQL 8.4 per PLAN.md M0.2. The integration suite
+# runs in full against each of them (M5).
 services:
   pg17:
     image: postgres:17
@@ -61,11 +62,18 @@ services:
       MYSQL_USER: datagit
       MYSQL_PASSWORD: datagit
     ports: ["55484:3306"]
-    volumes: ["mysql84data:/var/lib/mysql"]
+    volumes:
+      - "mysql84data:/var/lib/mysql"
+      - "./test/mysql-init:/docker-entrypoint-initdb.d:ro"
+    # The §6.3 write guard installs triggers. With binary logging on, MySQL wants
+    # SUPER to create one unless creators are trusted, and the test user is
+    # deliberately not a superuser. (A comment cannot go inside the folded block
+    # below: YAML keeps it, and mysqld reads the # as an argument.)
     command: >
       mysqld
       --innodb-buffer-pool-size=2G
       --local-infile=1
+      --log-bin-trust-function-creators=1
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-udatagit", "-pdatagit"]
       interval: 5s

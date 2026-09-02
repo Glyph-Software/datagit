@@ -25,9 +25,9 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	pb "github.com/Glyph-Software/datagit/gen/datagit/v1"
-	"github.com/Glyph-Software/datagit/internal/adapter/postgres"
+	"github.com/Glyph-Software/datagit/internal/connect"
+	"github.com/Glyph-Software/datagit/internal/db"
 	"github.com/Glyph-Software/datagit/internal/obs"
-	"github.com/Glyph-Software/datagit/internal/pg"
 	"github.com/Glyph-Software/datagit/internal/server"
 	"github.com/Glyph-Software/datagit/internal/store"
 )
@@ -47,15 +47,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pg.Open(ctx, *dsn)
+	pool, ad, err := connect.Open(ctx, *dsn)
 	if err != nil {
 		fatal("connecting: %v", err)
 	}
 	defer pool.Close()
+	log.Printf("connected to %s", connect.Describe(ad.Dialect()))
 
-	st := store.New(pool, postgres.NewWithExec(func(ctx context.Context, sql string) error {
-		return pool.Direct().Exec(ctx, sql)
-	}))
+	st := store.New(pool, ad)
 
 	// Refuse to run against a control schema newer than this build understands
 	// (§17.2). Serving anyway would risk writing history a newer version cannot
@@ -112,7 +111,7 @@ func main() {
 	}
 }
 
-func serveAdmin(addr string, pool *pg.Pool, m *obs.Metrics) {
+func serveAdmin(addr string, pool db.Pool, m *obs.Metrics) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

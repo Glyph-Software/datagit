@@ -67,6 +67,13 @@ type Caps struct {
 // narrow means the engine packages can be tested with fakes.
 type Tx interface {
 	Exec(ctx context.Context, sql string, args ...any) error
+	// ExecCount is Exec plus the number of rows affected.
+	//
+	// It exists so a "how many did that delete" question has a portable answer.
+	// PostgreSQL can express it as a data-modifying CTE with RETURNING; MySQL has
+	// neither, and the rows-affected count both engines already return is the
+	// answer on both.
+	ExecCount(ctx context.Context, sql string, args ...any) (int64, error)
 	Query(ctx context.Context, sql string, args ...any) (Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) Row
 }
@@ -81,6 +88,11 @@ type Rows interface {
 type Row interface {
 	Scan(dest ...any) error
 }
+
+// MaxSeq is the open-interval sentinel (§5.2d). An explicit sentinel rather than
+// NULL, so `seq_to > x` is a plain range predicate an index can use on both
+// engines and no query has to special-case the open version.
+const MaxSeq int64 = 9223372036854775807
 
 // Segment is one link of a resolution chain (§7.3).
 type Segment struct {
@@ -199,6 +211,43 @@ type Query struct {
 	Args []any
 }
 
+// DDLGen renders idempotent schema-change statements for one engine.
+//
+// Idempotency is a requirement, not a nicety: a crashed migration RESUMES from
+// the journal rather than restarting, so a step may run again after having
+// already taken effect (§10.4). PostgreSQL can express that inline with IF NOT
+// EXISTS; MySQL cannot, and has to test the catalogue first.
+type DDLGen interface {
+	AddColumn(table, col, sqlType string) string
+	DropColumn(table, col string) string
+	DeprecateColumn(table, col string) string
+	RenameColumn(table, from, to string) string
+	AlterColumnType(table, col, sqlType string) string
+	SetNotNull(table, col, sqlType string) string
+	DropNotNull(table, col, sqlType string) string
+	PreflightNotNull(table, col string) string
+}
+
+// GuardMode selects what a tracked table's write guard does (§6.3).
+type GuardMode string
+
+const (
+	// GuardOpen removes the guard: direct writes are allowed and drift is found
+	// by a verification scan rather than prevented.
+	GuardOpen GuardMode = "open"
+	// GuardReject refuses a write that does not carry DataGit's marker.
+	GuardReject GuardMode = "guarded"
+	// GuardCapture records the fact of an out-of-band write for reconciliation.
+	GuardCapture GuardMode = "capture"
+)
+
+// UniqueIndex is one unique constraint on a live table, in declared column
+// order. The order is part of the constraint's identity.
+type UniqueIndex struct {
+	Name string
+	Cols []string
+}
+
 // MigrationOp is one step of a migration plan (§10.4).
 type MigrationOp struct {
 	Ordinal int
@@ -248,6 +297,59 @@ type Adapter interface {
 	// ApplyMigration runs a plan through the resumable journalled state machine.
 	// Identical on both engines by design, so failure behaviour is tested once.
 	ApplyMigration(ctx context.Context, plan *MigrationPlan, journal Journal) error
+
+	// --- Portable SQL construction (§4.3) ---
+	//
+	// These exist for the places the engines differ SEMANTICALLY, where there is
+	// nothing to translate mechanically. Spelling differences ($N versus ?,
+	// quoting) are handled at the connection boundary in internal/db instead.
+
+	// KindFor maps an engine type name to a canonical kind. A type outside the
+	// set is refused for versioned mode, naming the column (§10.5 rule 5).
+	KindFor(sqlType string) (core.Kind, bool)
+
+	// Introspect reads a live table's columns and primary key. Each engine has
+	// its own catalogue, and the ordinal that column ids are derived from must be
+	// stable across a dropped column.
+	Introspect(ctx context.Context, tx Tx, physical string) ([]Column, []core.ColID, error)
+
+	// UniqueIndexes lists a live table's unique indexes other than the primary
+	// key, so a merge can check the constraints it is about to violate (§9.3).
+	// Each engine has its own catalogue for this.
+	UniqueIndexes(ctx context.Context, tx Tx, physical string) ([]UniqueIndex, error)
+
+	// MarkWriter sets the connection marker DataGit's own writes carry, so a
+	// guarded table's trigger can tell them from an out-of-band write (§6.3).
+	MarkWriter(ctx context.Context, tx Tx) error
+
+	// InstallGuard installs, replaces, or removes a tracked table's write guard.
+	// Trigger syntax, the marker's storage, and how a trigger raises an error are
+	// all different per engine, so the whole installation lives behind this.
+	InstallGuard(ctx context.Context, tx Tx, physical string, mode GuardMode) error
+
+	// DDL renders the schema-change statements for a migration plan (§10.4).
+	// Column DDL is one of the least portable parts of SQL, and every statement
+	// must also be idempotent so a crashed apply can resume.
+	DDL() DDLGen
+
+	// Quote renders an identifier.
+	Quote(ident string) string
+
+	// InsertOnConflict renders an INSERT whose behaviour on a duplicate key is
+	// either "do nothing" (updateCols empty) or "update these columns".
+	//
+	// body is the row source: either `VALUES (...)` or a `SELECT ...`.
+	//
+	// The MySQL form deliberately avoids INSERT IGNORE, which downgrades every
+	// error to a warning -- including data truncation. A no-op ON DUPLICATE KEY
+	// UPDATE ignores only the duplicate key, which is what the PostgreSQL clause
+	// means.
+	InsertOnConflict(table string, cols []string, body string, conflictCols, updateCols []string) string
+
+	// InsertReturningID inserts one row and returns its generated identifier.
+	// PostgreSQL uses RETURNING; MySQL uses LAST_INSERT_ID(), which is safe
+	// because the call happens on the same pinned connection.
+	InsertReturningID(ctx context.Context, tx Tx, sql string, args ...any) (int64, error)
 
 	// Now returns the database's clock. Commit timestamps come from here, never
 	// from a DataGit replica, so `committed_at` is monotonic per branch

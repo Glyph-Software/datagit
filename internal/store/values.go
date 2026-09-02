@@ -6,84 +6,17 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Glyph-Software/datagit/internal/adapter"
-	"github.com/Glyph-Software/datagit/internal/adapter/postgres"
+
 	"github.com/Glyph-Software/datagit/internal/catalog"
 	"github.com/Glyph-Software/datagit/internal/core"
 )
-
-// introspect reads a live table's columns and primary key from the catalogue.
-//
-// Column ids are assigned here, once, and never reused (§10.5 rule 1). They must
-// exist from the very first sidecar: retrofitting them later is a full rewrite.
-func introspect(ctx context.Context, tx adapter.Tx, physical string) ([]adapter.Column, []core.ColID, error) {
-	rows, err := tx.Query(ctx, `
-		SELECT a.attname,
-		       format_type(a.atttypid, a.atttypmod),
-		       NOT a.attnotnull,
-		       a.attnum
-		  FROM pg_attribute a
-		  JOIN pg_class c ON c.oid = a.attrelid
-		  JOIN pg_namespace n ON n.oid = c.relnamespace
-		 WHERE c.relname = $1 AND n.nspname = current_schema()
-		   AND a.attnum > 0 AND NOT a.attisdropped
-		 ORDER BY a.attnum`, physical)
-	if err != nil {
-		return nil, nil, fmt.Errorf("introspect %q: %w", physical, err)
-	}
-	defer rows.Close()
-
-	var cols []adapter.Column
-	byNum := map[int16]core.ColID{}
-	next := core.ColID(1)
-	for rows.Next() {
-		var name, typ string
-		var nullable bool
-		var attnum int16
-		if err := rows.Scan(&name, &typ, &nullable, &attnum); err != nil {
-			return nil, nil, err
-		}
-		kind, _ := postgres.KindFor(typ)
-		cols = append(cols, adapter.Column{
-			ID: next, Name: name, SQLType: typ, Kind: kind, Nullable: nullable,
-		})
-		byNum[attnum] = next
-		next++
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, err
-	}
-	if len(cols) == 0 {
-		return nil, nil, fmt.Errorf("table %q not found in the current schema", physical)
-	}
-
-	pkRows, err := tx.Query(ctx, `
-		SELECT unnest(i.indkey)
-		  FROM pg_index i
-		  JOIN pg_class c ON c.oid = i.indrelid
-		  JOIN pg_namespace n ON n.oid = c.relnamespace
-		 WHERE c.relname = $1 AND n.nspname = current_schema() AND i.indisprimary`, physical)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer pkRows.Close()
-	var pk []core.ColID
-	for pkRows.Next() {
-		var attnum int16
-		if err := pkRows.Scan(&attnum); err != nil {
-			return nil, nil, err
-		}
-		if id, ok := byNum[attnum]; ok {
-			pk = append(pk, id)
-		}
-	}
-	return cols, pk, pkRows.Err()
-}
 
 // bind converts a canonical value into a driver argument.
 func bind(v core.Value) (any, error) {
@@ -135,15 +68,18 @@ func fromDriver(x any, kind core.Kind) (core.Value, error) {
 	case float64:
 		return core.Float(val), nil
 	case string:
-		if kind == core.KindNumeric {
-			return core.Numeric(val)
-		}
-		return core.Text(val), nil
+		return fromText(val, kind)
 	case []byte:
-		if kind == core.KindText {
-			return core.Text(string(val)), nil
+		// MySQL hands back []byte for a great many column types -- DECIMAL,
+		// VARCHAR, TEXT, and the temporal types when time parsing is off -- so the
+		// bytes alone do not say what the value is. The COLUMN'S DECLARED KIND
+		// does, and it is authoritative: reading a DECIMAL as opaque bytes would
+		// put the wrong tag in the canonical encoding and change the commit hash
+		// for a value that did not change (§12.1).
+		if kind == core.KindBytes {
+			return core.Bytes(val), nil
 		}
-		return core.Bytes(val), nil
+		return fromText(string(val), kind)
 	case time.Time:
 		return core.Time(val), nil
 	case pgtype.Numeric:
@@ -156,6 +92,47 @@ func fromDriver(x any, kind core.Kind) (core.Value, error) {
 		return core.Text(uuidText(val)), nil
 	}
 	return core.Value{}, fmt.Errorf("cannot convert %T to a canonical value", x)
+}
+
+// fromText interprets a textual driver value as the column's declared kind.
+func fromText(s string, kind core.Kind) (core.Value, error) {
+	switch kind {
+	case core.KindNumeric:
+		return core.Numeric(s)
+	case core.KindInt:
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return core.Value{}, fmt.Errorf("column declared integer holds %q: %w", s, err)
+		}
+		return core.Int(n), nil
+	case core.KindFloat:
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return core.Value{}, fmt.Errorf("column declared float holds %q: %w", s, err)
+		}
+		return core.Float(f), nil
+	case core.KindBool:
+		switch s {
+		case "1", "true", "TRUE", "t", "y", "yes":
+			return core.Bool_(true), nil
+		case "0", "false", "FALSE", "f", "n", "no":
+			return core.Bool_(false), nil
+		}
+		return core.Value{}, fmt.Errorf("column declared boolean holds %q", s)
+	case core.KindTime:
+		for _, layout := range []string{
+			time.RFC3339Nano, "2006-01-02 15:04:05.999999", "2006-01-02 15:04:05", "2006-01-02",
+		} {
+			if ts, err := time.Parse(layout, s); err == nil {
+				return core.Time(ts.UTC()), nil
+			}
+		}
+		return core.Value{}, fmt.Errorf("column declared timestamp holds %q", s)
+	case core.KindBytes:
+		return core.Bytes([]byte(s)), nil
+	default:
+		return core.Text(s), nil
+	}
 }
 
 func numericString(n pgtype.Numeric) (string, error) {

@@ -6,6 +6,7 @@
 
 PG17_DSN ?= postgres://datagit:datagit@localhost:55417/datagit
 PG16_DSN ?= postgres://datagit:datagit@localhost:55416/datagit
+MYSQL_DSN ?= datagit:datagit@tcp(127.0.0.1:55484)/datagit?multiStatements=true
 
 # Number of random operation sequences for the differential harness.
 # 170000 x 60 ops is roughly 10M operations, the Phase 0 S2 bar.
@@ -47,8 +48,29 @@ test: ## Unit tests, race detector on
 	go test -race ./internal/...
 
 .PHONY: test-integration
-test-integration: ## Integration tests against a real PostgreSQL (needs db-up)
-	go test ./test/integration/ -v -count=1
+test-integration: ## Integration tests on every supported engine (needs db-up)
+	@$(MAKE) --no-print-directory test-integration-pg17
+	@$(MAKE) --no-print-directory test-integration-pg16
+	@$(MAKE) --no-print-directory test-integration-mysql
+
+# The SAME suite runs against each engine. Nothing here is engine-specific, which
+# is the point: a feature cannot ship working on one of them (§4.3, M5). An
+# unreachable database named by DATAGIT_TEST_DSN FAILS rather than skipping, so a
+# green run always means the suite actually ran.
+.PHONY: test-integration-pg17
+test-integration-pg17: ## Integration tests against PostgreSQL 17
+	@echo "== PostgreSQL 17 =="
+	DATAGIT_TEST_DSN="$(PG17_DSN)" go test ./test/integration/ -count=1
+
+.PHONY: test-integration-pg16
+test-integration-pg16: ## Integration tests against PostgreSQL 16
+	@echo "== PostgreSQL 16 =="
+	DATAGIT_TEST_DSN="$(PG16_DSN)" go test ./test/integration/ -count=1
+
+.PHONY: test-integration-mysql
+test-integration-mysql: ## Integration tests against MySQL 8.4
+	@echo "== MySQL 8.4 =="
+	DATAGIT_TEST_DSN="$(MYSQL_DSN)" go test ./test/integration/ -count=1
 
 .PHONY: test-acceptance
 test-acceptance: ## Run the README tour verbatim against a real database (W5)
@@ -82,10 +104,11 @@ test-regressions: ## Replay the seed corpus and the minimized repros
 # --- development databases ---------------------------------------------------
 
 .PHONY: db-up
-db-up: ## Start PostgreSQL 16 and 17
+db-up: ## Start PostgreSQL 16 and 17 and MySQL 8.4
 	docker compose up -d
-	@echo "pg17: $(PG17_DSN)"
-	@echo "pg16: $(PG16_DSN)"
+	@echo "pg17:  $(PG17_DSN)"
+	@echo "pg16:  $(PG16_DSN)"
+	@echo "mysql: $(MYSQL_DSN)"
 
 .PHONY: db-down
 db-down: ## Stop the databases (keeps volumes)
