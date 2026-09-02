@@ -1,6 +1,6 @@
 {
   "name": "@glyphsoftware/datagit-sdk",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "DataGit's TypeScript SDK: Git-style version control for rows in your own database",
   "main": "dist/src/index.js",
   "scripts": {
