@@ -19,6 +19,12 @@ on:
       - "api/proto/**"
       - "sdk/**"
       - "scripts/sync-python-version.mjs"
+      # The changesets that DRIVE a release live here, along with the workspace
+      # root that resolves them. Leaving these out means adding a changeset never
+      # triggers the release that consumes it.
+      - ".changeset/**"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/sdk-release.yml"
   workflow_dispatch:
 
