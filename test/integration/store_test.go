@@ -667,3 +667,8 @@ func TestExportRoundTripsTheEncoding(t *testing.T) {
 		}
 	}
 }
+
+// eq builds an equality predicate on a text column.
+func eq(col core.ColID, v string) adapter.Expr {
+	return adapter.Compare{Col: col, Op: adapter.Eq, Value: core.Text(v)}
+}

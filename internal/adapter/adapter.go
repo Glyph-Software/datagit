@@ -131,6 +131,16 @@ type ResolveSpec struct {
 	// inside the arms, because row identity is immutable.
 	Filter Expr
 
+	// KeyFilter restricts resolution to specific primary keys, and IS pushed
+	// into every union arm.
+	//
+	// That is safe only because a row's primary key is its identity for all of
+	// history (§3.2, Phase 0 finding F6): no version of a row ever carries a
+	// different key, so filtering by key cannot change which version wins. It
+	// only stops the scan considering other keys. No value predicate has this
+	// property, which is why Filter above is applied to the resolved row instead.
+	KeyFilter Expr
+
 	// Limit and After page the result. Phase 0 finding F9: each arm must be
 	// ordered and limited individually, and the per-column index must end with
 	// the primary key, or the page bounds the output without bounding the work.

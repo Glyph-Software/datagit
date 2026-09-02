@@ -65,41 +65,56 @@ func (s *Store) chainAt(ctx context.Context, tx adapter.Tx, commit hash.Digest) 
 	return chain, json.Unmarshal(b, &chain)
 }
 
-// currentRow resolves one key on a branch at a seq.
+// keyFilter builds a primary-key predicate for a canonical key.
+//
+// Safe to push into the resolution arms because row identity is immutable
+// (finding F6). See adapter.ResolveSpec.KeyFilter.
+func keyFilter(t *Table, pk core.PK) (adapter.Expr, error) {
+	vals, err := decodePK(pk, t)
+	if err != nil {
+		return nil, err
+	}
+	terms := make([]adapter.Expr, 0, len(t.PKColumns))
+	for i, id := range t.PKColumns {
+		terms = append(terms, adapter.Compare{Col: id, Op: adapter.Eq, Value: vals[i]})
+	}
+	if len(terms) == 1 {
+		return terms[0], nil
+	}
+	return adapter.And{Terms: terms}, nil
+}
+
+// currentRow resolves one key through a whole chain.
+//
+// It must walk the FULL chain, not just the branch's own segment: a branch that
+// has never written a key still inherits it, and deleting such a row would
+// otherwise look like a no-op on an absent key and be silently skipped.
 func (s *Store) currentRow(ctx context.Context, tx adapter.Tx, t *Table,
-	branch uuid.UUID, seq int64, pk core.PK) (core.Row, bool, error) {
-	pkVals, err := decodePK(pk, t)
+	chain []adapter.Segment, pk core.PK) (core.Row, bool, error) {
+	kf, err := keyFilter(t, pk)
 	if err != nil {
 		return nil, false, err
 	}
-	where, args := sidecarPKWhere(t, pkVals, 3)
-	args = append([]any{branch, seq}, args...)
-
-	sel := make([]string, 0, len(t.Columns))
-	for _, c := range t.Columns {
-		sel = append(sel, quote(catalog.SidecarColumn(uint32(c.ID))))
-	}
-	sql := fmt.Sprintf(
-		`SELECT %s, op FROM %s
-		  WHERE branch_id=$1 AND session_id IS NULL AND seq_from <= $2 AND seq_to > $2 AND %s
-		  ORDER BY seq_from DESC LIMIT 1`,
-		strings.Join(sel, ", "), quote(catalog.SidecarTable(t.Physical)), where)
-
-	rows, err := tx.Query(ctx, sql, args...)
+	q, err := s.ad.ResolveQuery(&adapter.ResolveSpec{
+		Table: t.Spec(), Chain: chain, KeyFilter: kf,
+	})
 	if err != nil {
 		return nil, false, err
+	}
+	rows, err := tx.Query(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("resolve key: %w", err)
 	}
 	defer rows.Close()
 	if !rows.Next() {
 		return nil, false, rows.Err()
 	}
-	row, op, err := scanRow(rows, t)
+	row, _, err := scanRow(rows, t)
 	if err != nil {
 		return nil, false, err
 	}
-	if op == core.OpDelete {
-		return nil, false, nil
-	}
+	// The resolve query already filters tombstones in the outer scope, so a row
+	// reaching here is live by construction.
 	return row, true, nil
 }
 
@@ -396,7 +411,7 @@ func (s *Store) currentRowChain(ctx context.Context, tx adapter.Tx, t *Table,
 	if len(chain) == 0 {
 		return nil, false, nil
 	}
-	return s.currentRow(ctx, tx, t, chain[0].BranchID, chain[0].Seq, pk)
+	return s.currentRow(ctx, tx, t, chain, pk)
 }
 
 // VerifyDrift compares the live table against the resolved default branch

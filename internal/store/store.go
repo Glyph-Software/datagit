@@ -368,7 +368,7 @@ func (s *Store) Commit(ctx context.Context, req CommitRequest) (*CommitResult, e
 
 		var leaves []hash.Change
 		for _, ch := range changes {
-			before, live, err := s.currentRow(ctx, tx, req.Table, branchID, headSeq, ch.PK)
+			before, live, err := s.currentRow(ctx, tx, req.Table, chain, ch.PK)
 			if err != nil {
 				return err
 			}

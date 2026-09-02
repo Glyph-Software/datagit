@@ -278,9 +278,17 @@ func (b *builder) build() (adapter.Query, error) {
 	prio := 0
 	if b.spec.Session != nil {
 		// Priority -1: the session's own staged rows (§7.3, §6.2).
+		sessWhere := fmt.Sprintf("v.session_id = %s", b.arg(*b.spec.Session))
+		if b.spec.KeyFilter != nil {
+			k, err := b.compile(b.spec.KeyFilter, "v")
+			if err != nil {
+				return adapter.Query{}, err
+			}
+			sessWhere += " AND (" + k + ")"
+		}
 		arms = append(arms, fmt.Sprintf(
-			`SELECT -1 AS prio, %s, v.op FROM %s v WHERE v.session_id = %s`,
-			prefixed("v", valCols), sc, b.arg(*b.spec.Session)))
+			`SELECT -1 AS prio, %s, v.op FROM %s v WHERE %s`,
+			prefixed("v", valCols), sc, sessWhere))
 	}
 	for _, seg := range b.spec.Chain {
 		where, err := b.armWhere(seg)
@@ -327,12 +335,22 @@ WHERE %s%s`,
 	return adapter.Query{SQL: sql, Args: b.args}, nil
 }
 
-// armWhere is the per-segment interval predicate. Note what is NOT here: no
-// tombstone filter and no value filter.
+// armWhere is the per-segment interval predicate.
+//
+// Note what is NOT here: no tombstone filter and no value filter. A primary-key
+// filter IS included, because row identity is immutable (finding F6).
 func (b *builder) armWhere(seg adapter.Segment) (string, error) {
-	return fmt.Sprintf(
+	w := fmt.Sprintf(
 		"v.branch_id = %s AND v.session_id IS NULL AND v.seq_from <= %s AND v.seq_to > %s",
-		b.arg(seg.BranchID), b.arg(seg.Seq), b.arg(seg.Seq)), nil
+		b.arg(seg.BranchID), b.arg(seg.Seq), b.arg(seg.Seq))
+	if b.spec.KeyFilter != nil {
+		k, err := b.compile(b.spec.KeyFilter, "v")
+		if err != nil {
+			return "", err
+		}
+		w += " AND (" + k + ")"
+	}
+	return w, nil
 }
 
 func (b *builder) afterClause(alias string, pkCols []string) string {
