@@ -42,14 +42,33 @@ Reading
   log                       Show the commit history
   history <table>           Show one row's version chain (--pk)
   blame <table>             Attribute each cell of one row (--pk)
-  diff <table>              Show what changed between two commits (--from, --to)
+  diff <table>              Show what changed between two commits (--from-seq, --to-seq)
 
 Writing
   commit <table>            Apply a change set (--set, --delete, -m)
   revert <commit>           A new commit that undoes a prior one; erases nothing
 
-Verification
-  verify                    Check drift, hash-chain integrity, or both
+Branching
+  branch [list]             List branches and tags
+  branch create <name>      Fork a branch (--from); O(1), copies no data
+  branch delete <name>      Delete a branch
+  branch protect <name>     Require approvals to merge (--approvals)
+  merge <from>              Merge a branch (--table, --into)
+  update-from-parent        Absorb the parent's newer commits (--table)
+  materialize <branch>      Copy a branch into a real schema (--into)
+
+Review
+  proposal [list]           List change proposals
+  proposal create           Open one (--from, --into, --title)
+  proposal approve|comment|reject   Review one (--id, -m)
+  proposal conflicts        Show a conflicted proposal (--id, --table)
+  proposal merge            Merge an approved proposal (--id, --table)
+
+Verification and operations
+  verify                    Check drift and hash-chain integrity
+  gc                        Reclaim unreachable versions and expired sessions
+  prune                     Apply a retention policy (--table, --keep-commits)
+  purge <table>             Physically erase a row (--pk, --reason); audited
 
 Global flags:
   --dsn      PostgreSQL connection string (or $DATAGIT_DSN)
@@ -102,8 +121,16 @@ func run(args []string) error {
 	fs.String("table", "", "revert: the table to revert within")
 	fs.Bool("force", false, "revert: proceed even if later changes would be discarded")
 	fs.Int("limit", 0, "maximum rows or commits")
-	fs.Int("from", 0, "diff: starting sequence")
-	fs.Int("to", -1, "diff: ending sequence (default: head)")
+	fs.Int("from-seq", 0, "diff: starting sequence")
+	fs.Int("to-seq", -1, "diff: ending sequence (default: head)")
+	fs.String("from", "", "branch/proposal: source branch")
+	fs.String("into", "", "merge/proposal/materialize: target branch or schema")
+	fs.String("title", "", "proposal: title")
+	fs.String("reason", "", "purge: stated reason (required)")
+	fs.Int("id", 0, "proposal id")
+	fs.Int("approvals", 1, "branch protect: approvals required")
+	fs.Int("keep-days", 0, "prune: keep history for N days")
+	fs.Int("keep-commits", 0, "prune: keep the last N commits")
 
 	switch cmd {
 	case "help", "-h", "--help":
@@ -135,6 +162,22 @@ func run(args []string) error {
 		return withStore(fs, g, rest, cmdRevert)
 	case "verify":
 		return withStore(fs, g, rest, cmdVerify)
+	case "branch":
+		return withStore(fs, g, rest, cmdBranch)
+	case "merge":
+		return withStore(fs, g, rest, cmdMerge)
+	case "update-from-parent":
+		return withStore(fs, g, rest, cmdUpdateFrom)
+	case "proposal":
+		return withStore(fs, g, rest, cmdProposal)
+	case "materialize":
+		return withStore(fs, g, rest, cmdMaterialize)
+	case "gc":
+		return withStore(fs, g, rest, cmdGC)
+	case "prune":
+		return withStore(fs, g, rest, cmdPrune)
+	case "purge":
+		return withStore(fs, g, rest, cmdPurge)
 	}
 	return fmt.Errorf("unknown command %q (try: datagit help)", cmd)
 }
@@ -354,14 +397,14 @@ func cmdBlame(e *env2) error {
 
 func cmdDiff(e *env2) error {
 	if len(e.args) < 1 {
-		return fmt.Errorf("usage: datagit diff <table> --from <seq> [--to <seq>]")
+		return fmt.Errorf("usage: datagit diff <table> --from-seq <n> [--to-seq <n>]")
 	}
 	t, err := e.st.LoadTable(e.ctx, e.repo, e.args[0])
 	if err != nil {
 		return err
 	}
 	entries, err := e.st.Diff(e.ctx, e.repo, t, e.g.branch,
-		int64(intFlag(e.fs, "from")), int64(intFlagOr(e.fs, "to", -1)))
+		int64(intFlag(e.fs, "from-seq")), int64(intFlagOr(e.fs, "to-seq", -1)))
 	if err != nil {
 		return err
 	}

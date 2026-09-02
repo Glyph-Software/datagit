@@ -48,6 +48,11 @@ test: ## Unit tests, race detector on
 test-integration: ## Integration tests against a real PostgreSQL (needs db-up)
 	go test ./test/integration/ -v -count=1
 
+.PHONY: test-acceptance
+test-acceptance: ## Run the README tour verbatim against a real database (W5)
+	go build -o bin/datagit ./cmd/datagit
+	bash test/acceptance/tour.sh
+
 .PHONY: test-frozen
 test-frozen: ## Verify the frozen canonical encoding and commit hash (M0.4, W3)
 	go test ./internal/hash/ -v

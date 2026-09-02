@@ -1,4 +1,5 @@
 # Go build output
+/bin/
 /datagit
 /datagitd
 /s1_resolution
