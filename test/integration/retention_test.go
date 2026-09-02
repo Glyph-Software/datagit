@@ -164,3 +164,81 @@ func TestVerifyIntervalsDetectsCorruption(t *testing.T) {
 }
 
 var _ = core.OpUpdate
+
+// TestGuardedModeRejectsOutOfBandWrites (§6.3). The invariant that the live
+// table is main@HEAD holds only while writes go through DataGit; guarded mode
+// enforces that for tables that can afford to break legacy writers.
+func TestGuardedModeRejectsOutOfBandWrites(t *testing.T) {
+	f := setup(t)
+	if err := f.store.SetWriteMode(f.ctx, f.table, store.ModeGuarded); err != nil {
+		t.Fatalf("set guarded: %v", err)
+	}
+
+	// A direct write, exactly what a psql session or a legacy job does.
+	err := f.pool.Direct().Exec(f.ctx, `UPDATE products SET price = 999.99 WHERE sku = 'MUG-01'`)
+	if err == nil {
+		t.Fatal("guarded mode did not reject an out-of-band write")
+	}
+	if !contains(err.Error(), "guarded mode") {
+		t.Errorf("the rejection should explain itself, got: %v", err)
+	}
+
+	// DataGit's own writes still pass, because its transactions set the marker.
+	if _, err := f.store.Commit(f.ctx, store.CommitRequest{
+		Repo: f.repo, Table: f.table, Branch: store.DefaultBranch, Author: principal,
+		Message: "a legitimate change",
+		Changes: []store.Change{{PK: f.pk(t, "MUG-01"), Op: core.OpUpdate,
+			Row: f.row("MUG-01", "Enamel mug", "kitchen", "13.00", "2026-08-14T00:00:00Z")}},
+	}); err != nil {
+		t.Fatalf("guarded mode blocked DataGit's own write: %v", err)
+	}
+	if got := f.livePrice(t, "MUG-01"); got != "13.00" {
+		t.Errorf("live price is %s, want 13.00", got)
+	}
+}
+
+// TestCaptureModeRecordsOutOfBandWrites (§6.3). A trigger has no author, no
+// message, and no commit boundary, so capture records THAT a write happened and
+// leaves reconciliation to the drift verifier.
+func TestCaptureModeRecordsOutOfBandWrites(t *testing.T) {
+	f := setup(t)
+	if err := f.store.SetWriteMode(f.ctx, f.table, store.ModeCapture); err != nil {
+		t.Fatalf("set capture: %v", err)
+	}
+	must(t, f.pool.Direct().Exec(f.ctx, `UPDATE products SET price = 999.99 WHERE sku = 'MUG-01'`))
+
+	n, err := f.store.DriftEvents(f.ctx, f.table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Error("capture mode recorded nothing for an out-of-band write")
+	}
+	// And the drift scan agrees.
+	rep, err := f.store.VerifyDrift(f.ctx, f.repo, f.table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Mismatched == 0 {
+		t.Error("the drift scan did not see the out-of-band write")
+	}
+}
+
+// TestOpenModeAddsNoTriggers is the default and the happy path: DESIGN.md §5.1
+// requires the live table to carry no triggers on the happy path.
+func TestOpenModeAddsNoTriggers(t *testing.T) {
+	f := setup(t)
+	if err := f.store.SetWriteMode(f.ctx, f.table, store.ModeOpen); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	must(t, f.pool.Direct().QueryRow(f.ctx, `
+		SELECT count(*) FROM pg_trigger tg
+		  JOIN pg_class c ON c.oid = tg.tgrelid
+		  JOIN pg_namespace ns ON ns.oid = c.relnamespace
+		 WHERE c.relname='products' AND ns.nspname=current_schema()
+		   AND NOT tg.tgisinternal`).Scan(&n))
+	if n != 0 {
+		t.Errorf("open mode left %d trigger(s) on the live table; the happy path must add none", n)
+	}
+}

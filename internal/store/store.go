@@ -339,6 +339,11 @@ func (s *Store) Commit(ctx context.Context, req CommitRequest) (*CommitResult, e
 	}
 	res := &CommitResult{}
 	err := s.pool.InTx(ctx, func(tx adapter.Tx) error {
+		// Identify this transaction as DataGit's, so a guarded table's trigger
+		// lets it through (§6.3).
+		if err := MarkWriter(ctx, tx); err != nil {
+			return err
+		}
 		branchID, headCommit, headSeq, chain, err := s.loadRef(ctx, tx, req.Repo, req.Branch)
 		if err != nil {
 			return err

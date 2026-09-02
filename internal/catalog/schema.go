@@ -181,6 +181,17 @@ CREATE TABLE IF NOT EXISTS datagit_migration_journal (
 
 -- The purge tombstone (§13.4). It records THAT a purge happened -- by whom,
 -- when, why, and how many versions -- and never the purged content.
+-- Out-of-band writes observed by a capture-mode trigger (§6.3). A trigger has
+-- no author, no message, and no commit boundary, so it records that a write
+-- happened and leaves reconciliation to the drift verifier.
+CREATE TABLE IF NOT EXISTS datagit_drift_log (
+    id          bigserial PRIMARY KEY,
+    table_name  text NOT NULL,
+    op          text NOT NULL,
+    observed_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS datagit_drift_log_table ON datagit_drift_log (table_name, observed_at DESC);
+
 CREATE TABLE IF NOT EXISTS datagit_purge_log (
     id               bigserial PRIMARY KEY,
     repo_id          uuid   NOT NULL REFERENCES datagit_repo(id) ON DELETE CASCADE,
