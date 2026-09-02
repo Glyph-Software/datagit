@@ -207,6 +207,7 @@ export DATAGIT_DSN="datagit:datagit@tcp(127.0.0.1:55484)/datagit"
 - **[docs/measurements.md](docs/measurements.md)** — measured performance on all three engines, and what the measurements do not cover.
 - **[docs/phase0/findings.md](docs/phase0/findings.md)** — the eleven findings that changed the design, five of them correctness bugs.
 - **[sdk/README.md](sdk/README.md)** — the Python and TypeScript SDKs, and the three things neither will let you do.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — the rules a change is held to, and what CI does not cover.
 
 ## Prior art
 
