@@ -1,0 +1,19 @@
+{
+  "name": "datagit-workspace",
+  "private": true,
+  "description": "Workspace root. Exists so changesets runs from the repository root — see .changeset/README.md.",
+  "workspaces": [
+    "sdk/typescript"
+  ],
+  "scripts": {
+    "changeset": "changeset",
+    "version-packages": "changeset version && node scripts/sync-python-version.mjs",
+    "release": "npm run build --workspace @glyphsoftware/datagit-sdk && changeset publish",
+    "test:sdk": "npm test --workspace @glyphsoftware/datagit-sdk"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "^1.0.0",
+    "@changesets/cli": "^2.31.1"
+  },
+  "license": "Apache-2.0"
+}

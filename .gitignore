@@ -8,6 +8,11 @@
 *.test
 *.out
 
+# Node. node_modules lives at the ROOT now that the workspace does, and the
+# release workflow runs `git add .` from here — an unignored node_modules would
+# be committed into the version pull request.
+node_modules/
+
 # Local env
 .env
 *.local

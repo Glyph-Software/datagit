@@ -51,15 +51,15 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: sdk/typescript/package-lock.json
+          cache-dependency-path: package-lock.json
           registry-url: https://registry.npmjs.org
 
-      - run: npm ci --prefix sdk/typescript
+      - run: npm ci
 
       # Publishing is irreversible, so the gate comes before it rather than in a
       # workflow that merely ran at some point on some commit.
       - name: Tests must pass before anything is published
-        run: npm test --prefix sdk/typescript
+        run: npm run test:sdk
 
       - name: The SDK versions must agree
         run: node scripts/sync-python-version.mjs --check
@@ -68,7 +68,12 @@ jobs:
         id: changesets
         uses: changesets/action@v1
         with:
-          cwd: sdk/typescript
+          # Deliberately no `cwd`. The action commits with `git add .` from its
+          # working directory, so pointing it at sdk/typescript silently dropped
+          # the Python version bump from the release commit — npm went to 0.1.0
+          # while sdk/python stayed behind. Running from the repository root is
+          # what makes the two packages move together.
+          #
           # Runs `changeset version` and then carries the computed version to the
           # Python package, which changesets cannot see.
           version: npm run version-packages

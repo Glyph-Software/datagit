@@ -4,11 +4,16 @@ This directory records **version intent**: what changed, and whether it is a
 patch, a minor, or a breaking change. It does not record what the diff did — the
 commit message does that.
 
-## Why it lives here and not at the repository root
+## Why there is a `package.json` at the root of a Go repository
 
-Changesets is a JavaScript tool. Putting a `package.json` at the root of a Go
-repository so that a JS tool could find it would be a worse trade than asking you
-to `cd sdk/typescript`, and `make changeset` from the root does that for you.
+Changesets discovers packages through a workspace, so it needs one. It could have
+lived in `sdk/typescript` instead — and it did, until that broke a release.
+
+The `changesets/action` commits the version bump with `git add .` from its working
+directory. Pointed at `sdk/typescript`, that staged the npm bump and silently
+dropped the Python one: npm went to 0.1.0 while `sdk/python` stayed at 0.0.0, in
+the same commit. Running from the repository root is what makes `git add .` cover
+both packages, so the two versions cannot come apart.
 
 ## The SDKs share one version
 

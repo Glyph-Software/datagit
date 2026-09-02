@@ -89,20 +89,20 @@ test-sdk-py: ## Python SDK tests (PYTHON=... for a venv)
 
 .PHONY: sdk-ts
 sdk-ts: ## Regenerate the TypeScript SDK stubs from the proto
-	cd sdk/typescript && npm install --no-audit --no-fund
+	npm install --no-audit --no-fund
 	buf generate --template buf.gen.ts.yaml
 
 .PHONY: test-sdk-ts
 test-sdk-ts: ## TypeScript SDK tests
-	cd sdk/typescript && npm test
+	npm run test:sdk
 
 .PHONY: changeset
 changeset: ## Record a version bump for the SDKs (both move together)
-	cd sdk/typescript && npx changeset
+	npx changeset
 
 .PHONY: sdk-version
 sdk-version: ## Apply queued changesets: bump both SDKs and write the changelog
-	cd sdk/typescript && npm run version-packages
+	npm run version-packages
 
 .PHONY: check-sdk-versions
 check-sdk-versions: ## Fail if the two SDK versions have drifted apart

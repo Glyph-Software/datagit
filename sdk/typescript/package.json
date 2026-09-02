@@ -6,10 +6,7 @@
   "scripts": {
     "build": "tsc",
     "test": "tsc && node --test dist/test/*.test.js",
-    "typecheck": "tsc --noEmit",
-    "changeset": "changeset",
-    "version-packages": "changeset version && node ../../scripts/sync-python-version.mjs",
-    "release": "npm run build && changeset publish"
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "datagit",
@@ -34,8 +31,6 @@
   ],
   "devDependencies": {
     "@bufbuild/protoc-gen-es": "2.14.1",
-    "@changesets/changelog-github": "^1.0.0",
-    "@changesets/cli": "^2.29.7",
     "@types/node": "^26.4.1",
     "typescript": "7.0.2"
   },
