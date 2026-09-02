@@ -241,16 +241,18 @@ it. That second step fails with
 
 > GitHub Actions is not permitted to create or approve pull requests
 
-when the organization forbids it. The repository-level setting is locked in that
-case — changing it returns `409 Conflict` — so it has to be fixed in one of two
-places:
+when the organization forbids it. **This is already enabled** for
+`Glyph-Software`, so it should not recur — but if the policy is ever turned off,
+the repository-level setting cannot override it (changing it there returns
+`409 Conflict`) and there are only two ways back:
 
 - **Organization settings** → Actions → General → Workflow permissions → *Allow
-  GitHub Actions to create and approve pull requests*. Needs an org owner.
+  GitHub Actions to create and approve pull requests*. Needs an org owner. This
+  is what is in use.
 - **Or add a `CHANGESETS_TOKEN` secret**: a fine-grained PAT scoped to this
   repository with `contents: write` and `pull-requests: write`. The restriction
-  applies to the Actions token, not a user token, so this works with no org
-  change. The workflow already prefers it when present.
+  applies to the Actions token, not a user token. The workflow already prefers
+  this secret when it exists, so no code change is needed to switch.
 
 Either way the version commit itself is safe: it is pushed to
 `changeset-release/main` before the failure, so nothing is lost — a pull request
