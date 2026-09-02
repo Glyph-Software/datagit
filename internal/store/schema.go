@@ -96,12 +96,20 @@ func (s *Store) loadSchemaAt(ctx context.Context, t *Table, branchID uuid.UUID, 
 	}
 	dropped := map[string]int64{}
 	if len(droppedJSON) > 0 {
-		_ = json.Unmarshal(droppedJSON, &dropped)
+		if err := json.Unmarshal(droppedJSON, &dropped); err != nil {
+			return nil, fmt.Errorf("schema version %d has an unreadable dropped set: %w", e, err)
+		}
 	}
 	for k, at := range dropped {
-		if id, err := strconv.Atoi(k); err == nil {
-			v.Dropped[core.ColID(id)] = at
+		// Parse at the width of core.ColID rather than through int: nextColID
+		// derives the next column id from v.Dropped, so an entry lost to a
+		// truncating conversion or a bad key would let it reissue an id an
+		// earlier epoch already used (§10.5 rule 2).
+		id, err := strconv.ParseUint(k, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("schema version %d has a bad dropped column id %q: %w", e, k, err)
 		}
+		v.Dropped[core.ColID(id)] = at
 	}
 	return v, nil
 }
@@ -227,7 +235,11 @@ func (s *Store) writeSchemaVersion(ctx context.Context, tx adapter.Tx, t *Table,
 	}
 	dropped := map[string]int64{}
 	for id, at := range v.Dropped {
-		dropped[strconv.Itoa(int(id))] = at
+		// FormatUint, not Itoa(int(id)): core.ColID is uint32, and int is 32 bits
+		// on a 32-bit build, so routing through it could write a negative key that
+		// the ParseUint on the read side would then reject. This is the exact
+		// mirror of that parse.
+		dropped[strconv.FormatUint(uint64(id), 10)] = at
 	}
 	dj, _ := json.Marshal(dropped)
 
@@ -242,7 +254,7 @@ func (s *Store) writeSchemaVersion(ctx context.Context, tx adapter.Tx, t *Table,
 	// The mask width is recorded WITH the version, because changed_cols is over
 	// column ids and only grows; comparing masks across epochs zero-extends the
 	// shorter one (§10.5).
-	width := int(nextColID(v))
+	width := int64(nextColID(v))
 
 	return tx.Exec(ctx, s.ad.InsertOnConflict("datagit_schema_version",
 		[]string{"table_id", "branch_id", "epoch", "columns", "dropped", "digest",
