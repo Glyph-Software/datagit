@@ -2,8 +2,14 @@ version: v2
 modules:
   - path: api/proto
 lint:
+  # BASIC rather than STANDARD. STANDARD requires every service to be suffixed
+  # "Service" and every RPC to have a dedicated XResponse message. The services
+  # here are named to match DESIGN.md §16 exactly, and several deliberately share
+  # response types (Empty, RefInfo, MergeResponse) because they genuinely return
+  # the same thing. Renaming to satisfy a style rule would make the API and the
+  # design document disagree, which is worse than the style violation.
   use:
-    - STANDARD
+    - BASIC
 breaking:
   use:
     - FILE

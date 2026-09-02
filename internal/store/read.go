@@ -639,3 +639,8 @@ func (s *Store) Log(ctx context.Context, repo *Repo, branch string, limit int) (
 	}
 	return out, rows.Err()
 }
+
+// KeyExpr builds a primary-key predicate for a canonical key, exported so the
+// service layer can turn a wire key into a point read without reimplementing the
+// canonical decoding.
+func KeyExpr(t *Table, pk core.PK) (adapter.Expr, error) { return keyFilter(t, pk) }

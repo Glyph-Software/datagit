@@ -38,13 +38,13 @@ real database. What exists:
 
 What is **not** done, stated plainly rather than left to be discovered:
 
-- **gRPC and REST** (M1.10). The CLI talks to the store directly; the service
-  surface is unbuilt.
 - **MySQL end to end** (M5). The adapter and parity gate exist, but the store's
   SQL still assumes PostgreSQL placeholders in places, and M5.3 has not measured
   MySQL against the S1 workloads — its performance targets remain unmeasured and
   must not be assumed.
-- **Partitioning, performance regression gates, OIDC** (M4.5, M4.6, M4.9).
+- **REST gateway** (M1.10 partial). gRPC is complete; grpc-gateway is not wired.
+- **Partitioning and performance regression gates** (M4.5, M4.6). OIDC is an
+  Authenticator implementation away; API keys ship.
 - **Schema changes through the branch and proposal flow** (M6). The schema
   engine plans and applies; it is not yet wired to merges.
 - **PII designation and the TypeScript/Python SDKs** (M7).

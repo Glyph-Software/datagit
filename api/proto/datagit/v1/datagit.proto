@@ -1,0 +1,543 @@
+// DataGit's service surface (DESIGN.md §16).
+//
+// gRPC is the source of truth; REST is generated from it. Both share the same
+// authorization path, because a policy enforced only by one client is not a
+// policy.
+syntax = "proto3";
+
+package datagit.v1;
+
+option go_package = "github.com/Glyph-Software/datagit/gen/datagit/v1;datagitv1";
+
+import "google/protobuf/timestamp.proto";
+
+// ---------------------------------------------------------------------------
+// Values
+// ---------------------------------------------------------------------------
+
+// Value mirrors the canonical value model (§12.1). The kinds and their numbers
+// match internal/core exactly, because they are part of the frozen encoding.
+message Value {
+  oneof kind {
+    bool is_null = 1;
+    bool bool_value = 2;
+    int64 int_value = 3;
+    double float_value = 4;
+    // Exact decimal, normalized. Never a float: the value is hashed into
+    // history, and a rounding difference would change the commit id.
+    string numeric_value = 5;
+    string text_value = 6;
+    bytes bytes_value = 7;
+    google.protobuf.Timestamp time_value = 8;
+  }
+}
+
+message Row {
+  // Keyed by STABLE column id, never by name (§10.5 rule 1), so a rename does
+  // not change the wire meaning of a row.
+  map<uint32, Value> cells = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Predicates (§7.4)
+// ---------------------------------------------------------------------------
+
+// Expr is a typed predicate tree. There is deliberately no string form: with no
+// SQL text to build, there is nothing to inject into (§15.4).
+message Expr {
+  oneof node {
+    Compare compare = 1;
+    In in = 2;
+    IsNull is_null = 3;
+    Junction and = 4;
+    Junction or = 5;
+    Expr not = 6;
+  }
+}
+
+message Compare {
+  uint32 col = 1;
+  CompareOp op = 2;
+  Value value = 3;
+}
+
+enum CompareOp {
+  COMPARE_OP_UNSPECIFIED = 0;
+  COMPARE_OP_EQ = 1;
+  COMPARE_OP_NE = 2;
+  COMPARE_OP_LT = 3;
+  COMPARE_OP_LE = 4;
+  COMPARE_OP_GT = 5;
+  COMPARE_OP_GE = 6;
+  COMPARE_OP_LIKE = 7;
+}
+
+message In {
+  uint32 col = 1;
+  repeated Value values = 2;
+}
+
+message IsNull { uint32 col = 1; }
+
+message Junction { repeated Expr terms = 1; }
+
+// ---------------------------------------------------------------------------
+// Changes and commits
+// ---------------------------------------------------------------------------
+
+enum Op {
+  OP_UNSPECIFIED = 0;
+  OP_INSERT = 1;
+  OP_UPDATE = 2;
+  OP_DELETE = 3;
+}
+
+message Change {
+  // Canonical primary key encoding.
+  bytes pk = 1;
+  Op op = 2;
+  Row row = 3; // absent for a delete
+}
+
+message CommitInfo {
+  bytes id = 1;
+  int64 seq = 2;
+  repeated bytes parents = 3;
+  string author = 4;
+  google.protobuf.Timestamp committed_at = 5;
+  string message = 6;
+  string external_ref = 7;
+  // "intact" or "purged". A purged commit's hash deliberately no longer matches
+  // its content (§13.4); the discontinuity is recorded rather than hidden.
+  string integrity = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Services
+// ---------------------------------------------------------------------------
+
+service Repository {
+  rpc CreateRepo(CreateRepoRequest) returns (RepoInfo);
+  rpc TrackTable(TrackTableRequest) returns (TableInfo);
+  rpc UntrackTable(UntrackTableRequest) returns (Empty);
+  rpc GetStatus(GetStatusRequest) returns (RepoStatus);
+}
+
+service Data {
+  rpc Get(GetRequest) returns (Row);
+  // Scan takes a typed filter and a cursor. The filter is applied to the
+  // RESOLVED row via the two-pass form, never pushed into the resolution arms
+  // (§7.3).
+  rpc Scan(ScanRequest) returns (stream Row);
+}
+
+service Version {
+  // Commit is THE write path. It carries the whole change set: there is no
+  // staging on the default branch (§6.1).
+  rpc Commit(CommitRequest) returns (CommitResponse);
+  rpc Log(LogRequest) returns (stream CommitInfo);
+  rpc Diff(DiffRequest) returns (stream ChangeDetail);
+  rpc Blame(BlameRequest) returns (stream CellBlame);
+  rpc History(HistoryRequest) returns (stream RowVersion);
+  // Revert adds a commit that undoes; it erases nothing.
+  rpc Revert(RevertRequest) returns (CommitResponse);
+}
+
+service Branching {
+  rpc CreateBranch(CreateBranchRequest) returns (RefInfo);
+  rpc DeleteBranch(DeleteBranchRequest) returns (Empty);
+  rpc ListRefs(ListRefsRequest) returns (stream RefInfo);
+  rpc CreateTag(CreateTagRequest) returns (RefInfo);
+  rpc UpdateFromParent(UpdateFromParentRequest) returns (MergeResponse);
+  rpc Materialize(MaterializeRequest) returns (Empty);
+  rpc Protect(ProtectRequest) returns (RefInfo);
+}
+
+service Sessions {
+  rpc OpenSession(OpenSessionRequest) returns (SessionInfo);
+  rpc SessionWrite(SessionWriteRequest) returns (Empty);
+  rpc CommitSession(CommitSessionRequest) returns (CommitResponse);
+  rpc AbandonSession(AbandonSessionRequest) returns (Empty);
+}
+
+service Proposals {
+  rpc CreateProposal(CreateProposalRequest) returns (ProposalInfo);
+  rpc Review(ReviewRequest) returns (Empty);
+  rpc ListConflicts(ListConflictsRequest) returns (stream ConflictInfo);
+  rpc ResolveConflict(ResolveConflictRequest) returns (Empty);
+  rpc MergeProposal(MergeProposalRequest) returns (MergeResponse);
+}
+
+service Admin {
+  rpc Prune(PruneRequest) returns (PruneResponse);
+  rpc RunGC(RunGCRequest) returns (GCResponse);
+  // Purge requires the separate `purge` capability, deliberately not bundled
+  // with admin (§15.3).
+  rpc Purge(PurgeRequest) returns (PurgeReceipt);
+  rpc Verify(VerifyRequest) returns (stream VerifyFinding);
+  rpc Export(ExportRequest) returns (stream ExportChunk);
+}
+
+// ---------------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------------
+
+message Empty {}
+
+message CreateRepoRequest { string name = 1; }
+message RepoInfo {
+  string id = 1;
+  string name = 2;
+  string default_branch = 3;
+}
+
+message TrackTableRequest {
+  string repo = 1;
+  string table = 2;
+  string mode = 3; // audit | versioned
+}
+
+message ColumnInfo {
+  uint32 id = 1; // stable, never reused (§10.5)
+  string name = 2;
+  string sql_type = 3;
+  bool nullable = 4;
+  bool primary_key = 5;
+}
+
+message TableInfo {
+  int64 id = 1;
+  string name = 2;
+  string mode = 3;
+  string state = 4;
+  repeated ColumnInfo columns = 5;
+}
+
+message UntrackTableRequest {
+  string repo = 1;
+  string table = 2;
+}
+
+message GetStatusRequest { string repo = 1; }
+message RepoStatus {
+  RepoInfo repo = 1;
+  repeated TableInfo tables = 2;
+  repeated RefInfo refs = 3;
+}
+
+message GetRequest {
+  string repo = 1;
+  string table = 2;
+  string branch = 3;
+  bytes pk = 4;
+  bytes at_commit = 5;
+  google.protobuf.Timestamp as_of = 6;
+}
+
+message ScanRequest {
+  string repo = 1;
+  string table = 2;
+  string branch = 3;
+  Expr filter = 4;
+  int32 limit = 5;
+  bytes after = 6; // keyset cursor
+  bytes at_commit = 7;
+  google.protobuf.Timestamp as_of = 8;
+}
+
+message CommitRequest {
+  string repo = 1;
+  string table = 2;
+  string branch = 3;
+  repeated Change changes = 4;
+  string message = 5;
+  string external_ref = 6;
+  // Optimistic concurrency. A mismatch returns FAILED_PRECONDITION carrying the
+  // actual head, and writes nothing.
+  bytes expected_head = 7;
+  // Retrying with the same key returns the original result rather than applying
+  // the change twice (§16.2).
+  string idempotency_key = 8;
+  // NOTE: there is no author field, and there never will be. The author comes
+  // from the authenticated principal (§15.2); an audit trail whose author is
+  // client-supplied is decoration.
+}
+
+message CommitResponse {
+  bytes id = 1;
+  int64 seq = 2;
+  int32 rows_changed = 3;
+}
+
+message LogRequest {
+  string repo = 1;
+  string branch = 2;
+  int32 limit = 3;
+}
+
+message DiffRequest {
+  string repo = 1;
+  string table = 2;
+  string branch = 3;
+  int64 from_seq = 4;
+  int64 to_seq = 5;
+}
+
+message ChangeDetail {
+  bytes pk = 1;
+  Op op = 2;
+  Row before = 3;
+  Row after = 4;
+  repeated uint32 changed_columns = 5;
+}
+
+message BlameRequest {
+  string repo = 1;
+  string table = 2;
+  string branch = 3;
+  bytes pk = 4;
+  repeated uint32 columns = 5;
+}
+
+message CellBlame {
+  uint32 col = 1;
+  Value value = 2;
+  bytes commit_id = 3;
+  string author = 4;
+  google.protobuf.Timestamp at = 5;
+  string message = 6;
+}
+
+message HistoryRequest {
+  string repo = 1;
+  string table = 2;
+  string branch = 3;
+  bytes pk = 4;
+}
+
+message RowVersion {
+  int64 seq_from = 1;
+  int64 seq_to = 2;
+  Op op = 3;
+  bytes commit_id = 4;
+  Row row = 5;
+  string author = 6;
+  google.protobuf.Timestamp at = 7;
+  string message = 8;
+}
+
+message RevertRequest {
+  string repo = 1;
+  string table = 2;
+  string branch = 3;
+  bytes commit_id = 4;
+  string message = 5;
+  // Reverting a commit whose rows changed again is refused by default, because
+  // it would silently discard the newer values.
+  bool force = 6;
+}
+
+message CreateBranchRequest {
+  string repo = 1;
+  string name = 2;
+  string from = 3;
+}
+
+message RefInfo {
+  string id = 1;
+  string kind = 2;
+  string name = 3;
+  bytes head = 4;
+  int64 head_seq = 5;
+  string parent = 6;
+  int32 chain_depth = 7;
+  bool protected = 8;
+  int32 min_approvals = 9;
+  // True while a chunked merge apply is in flight, during which a direct reader
+  // can observe a state that is not a commit (§9.5).
+  bool merge_in_progress = 10;
+}
+
+message DeleteBranchRequest {
+  string repo = 1;
+  string name = 2;
+}
+
+message ListRefsRequest { string repo = 1; }
+
+message CreateTagRequest {
+  string repo = 1;
+  string name = 2;
+  bytes at_commit = 3;
+}
+
+message UpdateFromParentRequest {
+  string repo = 1;
+  string table = 2;
+  string branch = 3;
+}
+
+message MaterializeRequest {
+  string repo = 1;
+  string branch = 2;
+  string into_schema = 3;
+}
+
+message ProtectRequest {
+  string repo = 1;
+  string branch = 2;
+  bool protected = 3;
+  int32 min_approvals = 4;
+}
+
+message OpenSessionRequest {
+  string repo = 1;
+  string branch = 2; // never the default branch (§6.1)
+}
+
+message SessionInfo {
+  string id = 1;
+  string branch = 2;
+  bytes base_commit = 3;
+  google.protobuf.Timestamp lease_until = 4;
+}
+
+message SessionWriteRequest {
+  string repo = 1;
+  string table = 2;
+  string session_id = 3;
+  repeated Change changes = 4;
+}
+
+message CommitSessionRequest {
+  string repo = 1;
+  string table = 2;
+  string session_id = 3;
+  string message = 4;
+}
+
+message AbandonSessionRequest {
+  string repo = 1;
+  string table = 2;
+  string session_id = 3;
+}
+
+message CreateProposalRequest {
+  string repo = 1;
+  string from = 2;
+  string into = 3;
+  string title = 4;
+  string description = 5;
+}
+
+message ProposalInfo {
+  int64 id = 1;
+  string from = 2;
+  string into = 3;
+  string title = 4;
+  string state = 5;
+  string created_by = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message ReviewRequest {
+  string repo = 1;
+  int64 proposal_id = 2;
+  string kind = 3; // comment | approve | request_changes
+  string body = 4;
+}
+
+message ListConflictsRequest {
+  string repo = 1;
+  string table = 2;
+  int64 proposal_id = 3;
+}
+
+message ConflictInfo {
+  int64 id = 1;
+  bytes pk = 2;
+  string column = 3;
+  string kind = 4; // cell | add_add | delete_modify | constraint
+  string base = 5;
+  string ours = 6;
+  string theirs = 7;
+  bool resolved = 8;
+}
+
+message ResolveConflictRequest {
+  string repo = 1;
+  int64 conflict_id = 2;
+  string resolution = 3; // ours | theirs | custom
+  string value = 4;
+}
+
+message MergeProposalRequest {
+  string repo = 1;
+  string table = 2;
+  int64 proposal_id = 3;
+  // Above the atomic apply limit a merge is refused unless this is set, because
+  // chunked apply relaxes atomicity and that must be a decision (§9.5).
+  bool allow_chunked = 4;
+}
+
+message MergeResponse {
+  bool clean = 1;
+  bytes commit_id = 2;
+  int32 rows_applied = 3;
+  repeated ConflictInfo conflicts = 4;
+}
+
+message PruneRequest {
+  string repo = 1;
+  string table = 2;
+  int32 keep_days = 3;
+  int32 keep_commits = 4;
+}
+
+message PruneResponse {
+  int32 versions_removed = 1;
+  int32 commits_protected = 2;
+}
+
+message RunGCRequest { string repo = 1; }
+message GCResponse {
+  int32 orphan_versions = 1;
+  int32 sessions_reaped = 2;
+}
+
+message PurgeRequest {
+  string repo = 1;
+  string table = 2;
+  bytes pk = 3;
+  // Required. Purge is audited and irreversible.
+  string reason = 4;
+}
+
+message PurgeReceipt {
+  int32 versions_removed = 1;
+  int32 commits_marked = 2;
+  google.protobuf.Timestamp at = 3;
+}
+
+message VerifyRequest {
+  string repo = 1;
+  string branch = 2;
+  bool drift = 3;
+  bool integrity = 4;
+  bool intervals = 5;
+}
+
+message VerifyFinding {
+  string check = 1; // drift | integrity | intervals
+  string table = 2;
+  bool ok = 3;
+  string detail = 4;
+}
+
+message ExportRequest {
+  string repo = 1;
+  string table = 2;
+  string branch = 3;
+}
+
+message ExportChunk { bytes jsonl = 1; }

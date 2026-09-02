@@ -22,6 +22,8 @@ help:
 .PHONY: build
 build: ## Build everything
 	go build ./...
+	go build -o bin/datagit ./cmd/datagit
+	go build -o bin/datagitd ./cmd/datagitd
 
 .PHONY: lint
 lint: ## go vet plus the internal/model import rule
