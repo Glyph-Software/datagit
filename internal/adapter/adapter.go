@@ -228,6 +228,33 @@ type DDLGen interface {
 	PreflightNotNull(table, col string) string
 }
 
+// Partition is one range of a partitioned sidecar.
+//
+// BranchID is honoured on PostgreSQL, which partitions on (branch_id, seq_from),
+// and IGNORED on MySQL, whose RANGE partitioning takes a single integer
+// expression and so partitions on seq_from alone. That is a real difference and
+// is documented on the MySQL adapter rather than smoothed over: on MySQL a
+// partition spans every branch for its sequence range.
+type Partition struct {
+	BranchID       [16]byte
+	FromSeq, ToSeq int64
+}
+
+// Partitioner creates and drops sidecar partitions (§14.3).
+//
+// The payoff is pruning: dropping a partition is a catalogue change and a file
+// unlink where deleting the same rows is a scan plus index maintenance. Phase 0
+// measured 33.7x.
+//
+// It is opt-in. A partitioned table must be CREATED partitioned, so enabling it
+// for an existing table means rewriting it, and imposing that on tables whose
+// history will never grow would be a poor trade.
+type Partitioner interface {
+	CreatePartitioned(ctx context.Context, tx Tx, t *TableSpec) error
+	Add(ctx context.Context, tx Tx, t *TableSpec, p Partition) error
+	Drop(ctx context.Context, tx Tx, physical string, p Partition) error
+}
+
 // GuardMode selects what a tracked table's write guard does (§6.3).
 type GuardMode string
 
@@ -331,6 +358,10 @@ type Adapter interface {
 	// Column DDL is one of the least portable parts of SQL, and every statement
 	// must also be idempotent so a crashed apply can resume.
 	DDL() DDLGen
+
+	// Partitioner is non-nil when the engine can partition sidecars (§14.3).
+	// Both engines can, with a difference the type documents.
+	Partitioner() Partitioner
 
 	// Quote renders an identifier.
 	Quote(ident string) string

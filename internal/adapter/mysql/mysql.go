@@ -104,6 +104,11 @@ func quoteIdent(s string) string {
 // the session index is plain rather than partial, and text primary-key columns
 // need an explicit length in the key.
 func (a *Adapter) CreateSidecar(ctx context.Context, tx adapter.Tx, t *adapter.TableSpec) error {
+	return a.createSidecarDDL(ctx, tx, t, "")
+}
+
+func (a *Adapter) createSidecarDDL(ctx context.Context, tx adapter.Tx,
+	t *adapter.TableSpec, suffix string) error {
 	sc := catalog.SidecarTable(t.PhysicalName)
 
 	var cols []string
@@ -137,7 +142,8 @@ CREATE TABLE IF NOT EXISTS %s (
   changed_cols varbinary(255) NOT NULL,
 %s,
   PRIMARY KEY (branch_id, %s, seq_from)
-) ENGINE=InnoDB`, quoteIdent(sc), MaxSeq, strings.Join(cols, ",\n"), strings.Join(pkParts, ", "))
+) ENGINE=InnoDB%s`, quoteIdent(sc), MaxSeq, strings.Join(cols, ",\n"),
+		strings.Join(pkParts, ", "), suffix)
 
 	if err := tx.Exec(ctx, ddl); err != nil {
 		return fmt.Errorf("create sidecar %s: %w", sc, err)

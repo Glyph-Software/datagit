@@ -72,6 +72,15 @@ test-integration-mysql: ## Integration tests against MySQL 8.4
 	@echo "== MySQL 8.4 =="
 	DATAGIT_TEST_DSN="$(MYSQL_DSN)" go test ./test/integration/ -count=1
 
+.PHONY: test-bench
+test-bench: ## Performance regression gates on every engine (M4.6, M5.3)
+	@echo "== PostgreSQL 17 =="
+	DATAGIT_TEST_DSN="$(PG17_DSN)"  go test ./test/bench/ -count=1 -v
+	@echo "== PostgreSQL 16 =="
+	DATAGIT_TEST_DSN="$(PG16_DSN)"  go test ./test/bench/ -count=1 -v
+	@echo "== MySQL 8.4 =="
+	DATAGIT_TEST_DSN="$(MYSQL_DSN)" go test ./test/bench/ -count=1 -v
+
 .PHONY: test-acceptance
 test-acceptance: ## Run the README tour verbatim against a real database (W5)
 	go build -o bin/datagit ./cmd/datagit

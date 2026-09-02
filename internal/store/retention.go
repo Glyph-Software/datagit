@@ -463,3 +463,64 @@ func prefixCols(alias string, cols []string) string {
 	}
 	return strings.Join(out, ", ")
 }
+
+// --- Partitioning (§14.3) ----------------------------------------------------
+
+// TrackPartitioned tracks a table with a PARTITIONED sidecar.
+//
+// Opt-in, and the reason is that it cannot be turned on later without a rewrite:
+// neither engine converts a populated table to a partitioned one in place. A
+// table whose history will grow to where pruning matters wants this from the
+// start; one that will not should not pay for it.
+func (s *Store) TrackPartitioned(ctx context.Context, repo *Repo, physical string,
+	mode adapter.Mode) (*Table, error) {
+
+	p := s.ad.Partitioner()
+	if p == nil {
+		return nil, fmt.Errorf("%s cannot partition sidecars", s.ad.Dialect())
+	}
+	return s.track(ctx, repo, physical, mode, p)
+}
+
+// AddPartition declares a sequence range as its own partition.
+func (s *Store) AddPartition(ctx context.Context, repo *Repo, t *Table,
+	branch string, fromSeq, toSeq int64) error {
+
+	p := s.ad.Partitioner()
+	if p == nil {
+		return fmt.Errorf("%s cannot partition sidecars", s.ad.Dialect())
+	}
+	branchID, _, _, _, err := s.loadRef(ctx, s.pool.Direct(), repo, branch)
+	if err != nil {
+		return err
+	}
+	return s.pool.InTx(ctx, func(tx adapter.Tx) error {
+		return p.Add(ctx, tx, t.Spec(), adapter.Partition{
+			BranchID: branchID, FromSeq: fromSeq, ToSeq: toSeq,
+		})
+	})
+}
+
+// DropPartition prunes a sequence range by dropping its partition.
+//
+// This is the operation partitioning exists for, and it is IRREVERSIBLE: the
+// versions in that range are gone, not marked. It is a retention action, so it
+// carries the same warning as prune — commits whose versions it removes keep
+// their record, and history in that range reads as thinned.
+func (s *Store) DropPartition(ctx context.Context, repo *Repo, t *Table,
+	branch string, fromSeq, toSeq int64) error {
+
+	p := s.ad.Partitioner()
+	if p == nil {
+		return fmt.Errorf("%s cannot partition sidecars", s.ad.Dialect())
+	}
+	branchID, _, _, _, err := s.loadRef(ctx, s.pool.Direct(), repo, branch)
+	if err != nil {
+		return err
+	}
+	return s.pool.InTx(ctx, func(tx adapter.Tx) error {
+		return p.Drop(ctx, tx, t.Physical, adapter.Partition{
+			BranchID: branchID, FromSeq: fromSeq, ToSeq: toSeq,
+		})
+	})
+}

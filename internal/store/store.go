@@ -202,6 +202,14 @@ func (s *Store) LookupRepo(ctx context.Context, name string) (*Repo, error) {
 // type has no canonical encoding makes the table ineligible. Approximating
 // either would produce history that cannot be reproduced or hashed.
 func (s *Store) Track(ctx context.Context, repo *Repo, physical string, mode adapter.Mode) (*Table, error) {
+	return s.track(ctx, repo, physical, mode, nil)
+}
+
+// track is Track with an optional partitioner. A non-nil one creates the sidecar
+// partitioned, which must happen at creation: neither engine converts a
+// populated table in place (§14.3).
+func (s *Store) track(ctx context.Context, repo *Repo, physical string,
+	mode adapter.Mode, part adapter.Partitioner) (*Table, error) {
 	var t *Table
 	err := s.pool.InTx(ctx, func(tx adapter.Tx) error {
 		cols, pk, err := s.ad.Introspect(ctx, tx, physical)
@@ -245,6 +253,9 @@ func (s *Store) Track(ctx context.Context, repo *Repo, physical string, mode ada
 				containsCol(pk, c.ID), i); err != nil {
 				return fmt.Errorf("register column %s: %w", c.Name, err)
 			}
+		}
+		if part != nil {
+			return part.CreatePartitioned(ctx, tx, t.Spec())
 		}
 		return s.ad.CreateSidecar(ctx, tx, t.Spec())
 	})

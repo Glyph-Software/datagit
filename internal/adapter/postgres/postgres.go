@@ -98,6 +98,14 @@ func quoteIdent(s string) string {
 // The commit_id index was dropped: a seq_from range on the range index answers
 // "what did this commit change".
 func (a *Adapter) CreateSidecar(ctx context.Context, tx adapter.Tx, t *adapter.TableSpec) error {
+	return a.createSidecarDDL(ctx, tx, t, "")
+}
+
+// createSidecarDDL builds the sidecar, optionally partitioned. The suffix is the
+// only difference between a plain and a partitioned sidecar, which is why they
+// share this rather than diverging into two DDL texts that can drift.
+func (a *Adapter) createSidecarDDL(ctx context.Context, tx adapter.Tx,
+	t *adapter.TableSpec, suffix string) error {
 	sc := catalog.SidecarTable(t.PhysicalName)
 
 	var cols []string
@@ -132,7 +140,7 @@ CREATE TABLE IF NOT EXISTS %s (
     changed_cols bytea    NOT NULL,
 %s,
     PRIMARY KEY (branch_id, %s, seq_from)
-)`, quoteIdent(sc), MaxSeq, strings.Join(cols, ",\n"), strings.Join(pkCols, ", "))
+)%s`, quoteIdent(sc), MaxSeq, strings.Join(cols, ",\n"), strings.Join(pkCols, ", "), suffix)
 
 	if err := tx.Exec(ctx, ddl); err != nil {
 		return fmt.Errorf("create sidecar %s: %w", sc, err)
