@@ -82,11 +82,9 @@ jobs:
           echo "npm user:  $(npm whoami 2>&1 || echo '(token did not authenticate)')"
           echo "orgs this user belongs to:"
           npm org ls glyphsoftware 2>&1 | head -5 || echo "  (cannot list @glyphsoftware — not a member, or the org does not exist)"
-          echo "account two-factor mode:"
-          # `auth-and-writes` means the registry demands a one-time password for
-          # every publish, which CI cannot supply. `auth-only` lets a token
-          # publish unattended.
-          npm profile get 2>&1 | grep -i "two-factor" || echo "  (could not read the profile)"
+          # Not reading the 2FA mode here: `npm profile get` is itself gated by
+          # the setting it would report, so on the accounts where it matters it
+          # fails rather than answers.
 
       - name: Version or publish
         id: changesets

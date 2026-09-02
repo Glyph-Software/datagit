@@ -171,6 +171,20 @@ The failure is late and looks like a permissions problem: the token authenticate
 the provenance statement is signed and logged, and only then does the registry
 reject the upload. Nothing is published when this happens.
 
+**The account's 2FA mode has to allow token writes.** npm accounts set to
+*Authorization and writes* demand a one-time password for every publish, and CI
+has no authenticator — every write fails with `EOTP` while reads keep working, so
+the token looks valid right up to the upload. Set
+[Two-Factor Authentication](https://www.npmjs.com/settings/~/profile) to
+**Authorization only**: login keeps its second factor, tokens can publish.
+
+The honest trade: with `Authorization only`, anyone holding the token can publish.
+That is inherent to unattended publishing, and the way back out is
+[trusted publishing](https://docs.npmjs.com/trusted-publishers) — once the package
+exists, attach a trusted publisher, delete `NPM_TOKEN`, and set 2FA back to
+*Authorization and writes*. OIDC is not a token, so the strict setting stops
+mattering.
+
 **Creating the granular token**, at
 [npmjs.com/settings/~/tokens/new](https://www.npmjs.com/settings/~/tokens/new):
 
