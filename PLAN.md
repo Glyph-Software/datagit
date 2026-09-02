@@ -60,7 +60,9 @@ Milestones map to DESIGN.md §20.2 versions. Section references like §7.3 point
 > measurement covered a single segment and branch resolution is the shape that
 > matters. Figures published in DESIGN.md §14.2 and README.md.
 >
-> S4 remains unrun by design: it gates M6, not M1.
+> S4 has since been run, ahead of M6: PASSED on both MySQL 8.4 and
+> PostgreSQL 17. Every injected crash point converges, so the contingency of
+> restricting MySQL to additive and widening operations is not needed.
 
 **Purpose:** falsify the design's load-bearing assumptions before building on them. Phase 0 code is throwaway **except S2**, which becomes the permanent test harness.
 
@@ -133,7 +135,7 @@ S1–S3 and S5 gate M1. **S4 gates M6 (schema), not M1** — MySQL DDL is not on
 - [x] S1, S3, S5 pass, or their fallbacks are adopted into DESIGN.md **before M1 starts**. S3's amplification bar was retried, found unreachable, and restated at ~6×; the two cheap index changes are adopted. DESIGN.md §14.2 and finding F11.
 - [x] S2's reference model and property harness are merged. **Still to do:** wire `make test-property` into CI once CI exists (M0.1).
 - [x] DESIGN.md §14.1 targets replaced with measured PostgreSQL numbers, relabelled as measured.
-- [ ] S4 scheduled before M6 and its result recorded before M6 starts.
+- [x] S4 scheduled before M6 and its result recorded before M6 starts. **Passed on both engines.**
 
 ### Carried into M1 from Phase 0
 

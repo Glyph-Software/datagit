@@ -466,6 +466,7 @@ found them are pinned in `test/property/testdata/corpus.txt` and the minimized
 | **S3** amplification | ≤ 3× | **bar unreachable; restated at ~6×** (F11) |
 | **S5** storage | ≤ 4× at rest excluding history | **pass** — 3.33× |
 | **S5** pruning | ≥ 10× faster than `DELETE` | **pass** — 33.7× |
+| **S4** crash convergence | resumes from every injected crash point | **pass** — both engines |
 
 S3's amplification bar was the one miss, and the retry showed the bar itself was
 wrong: ≤3× is unreachable with this storage model. Measured 6.4–8.4× as designed,
@@ -478,10 +479,36 @@ left for an adopter to discover.
 
 ---
 
+## S4 — the journalled migration state machine survives crashes
+
+**Run before M6, as scheduled.** PASSED on both engines.
+
+MySQL commits implicitly on every DDL statement, so a multi-statement migration
+that fails halfway cannot be rolled back by the engine. §10.4's answer is a
+resumable state machine rather than a transaction. The spike kills the process at
+every step boundary of a four-operation migration (add column, backfill, add
+index, drop column), restarts, and asserts convergence — then repeats for
+mid-step crashes, where the journal records an operation as started but never
+completed.
+
+| Crash point | MySQL 8.4 | PostgreSQL 17 |
+|---|---|---|
+| Before each of the 4 step completions | converges | converges |
+| Mid-step, re-run idempotently | converges | converges |
+
+Both engines behave identically, which is the point of §10.4 running the same
+machine on PostgreSQL despite its transactional DDL: failure behaviour is the
+same and only has to be tested once. **No fallback needed** — the contingency of
+restricting MySQL to additive and widening operations is not required.
+
+What the spike also confirms is that idempotency has to be written by hand, per
+operation. MySQL has no `IF NOT EXISTS` for constraints and none for columns
+before 8.0.29, so every operation carries its own existence check. That is a real
+cost of §10.4's design and belongs in M6's estimate.
+
 ## Not yet run
 
-**S4 (MySQL resumable migration apply)** gates M6, not M1, and has not been run.
-PLAN.md schedules it before the schema milestone.
+Nothing from Phase 0 remains unrun.
 
 **MySQL measurement for S1** informs v1.1 and is not a v1.0 gate. The MySQL
 adapter does not exist yet, so comparative resolution numbers remain open — as

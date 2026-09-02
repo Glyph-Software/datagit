@@ -116,6 +116,11 @@ spike-s3: ## S3: commit latency, concurrency, and write amplification
 	go run ./spikes/s3_commit -mode concurrency   -dsn "$(PG17_DSN)"
 	go run ./spikes/s3_commit -mode amplification -dsn "$(PG17_DSN)"
 
+.PHONY: spike-s4
+spike-s4: ## S4: crash-resume convergence for the migration state machine
+	go run ./spikes/s4_migration -engine mysql
+	go run ./spikes/s4_migration -engine postgres
+
 .PHONY: spike-s5
 spike-s5: ## S5: storage growth and partition pruning
 	go run ./spikes/s5_storage -mode sizes   -dsn "$(PG17_DSN)"

@@ -52,6 +52,27 @@ services:
       timeout: 5s
       retries: 30
 
+  # MySQL 8.4 for S4 (the resumable migration spike) and the M5 adapter.
+  mysql84:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: datagit
+      MYSQL_DATABASE: datagit
+      MYSQL_USER: datagit
+      MYSQL_PASSWORD: datagit
+    ports: ["55484:3306"]
+    volumes: ["mysql84data:/var/lib/mysql"]
+    command: >
+      mysqld
+      --innodb-buffer-pool-size=2G
+      --local-infile=1
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-udatagit", "-pdatagit"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
 volumes:
   pg17data:
   pg16data:
+  mysql84data:
