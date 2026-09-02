@@ -144,11 +144,30 @@ Neither is needed until the first release.
 
 | | |
 |---|---|
-| **npm** | The `@glyphsoftware` scope must exist on npm, and an `NPM_TOKEN` repository secret must have publish rights on it. Use a **granular access token** scoped to this package, not a classic automation token. The workflow publishes with [provenance](https://docs.npmjs.com/generating-provenance-statements), so it also needs `id-token: write` — already set. |
+| **npm** | The `@glyphsoftware` scope must exist on npm, and an `NPM_TOKEN` repository secret must have publish rights on it. Use a **granular access token**, not a classic automation token. The workflow publishes with [provenance](https://docs.npmjs.com/generating-provenance-statements), so it also needs `id-token: write` — already set. |
 | **PyPI** | A [trusted publisher](https://docs.pypi.org/trusted-publishers/) for `datagit`: owner `Glyph-Software`, repository `datagit`, workflow `sdk-release.yml`, environment `pypi`. No token, so there is no long-lived credential to leak. Confirm `datagit-sdk` is free before the first release, not after: the two registries publish in sequence and are not atomic, so a taken name fails the PyPI half once npm has already gone out.|
 
 The `pypi` environment should be created in repository settings, with required
 reviewers if you want a human gate in front of the upload itself.
+
+### The first publish needs a token even if you want OIDC
+
+npm trusted publishing (OIDC) is the better steady state — no stored credential —
+but it is configured **per package on npmjs.com**, and a package that has never
+been published cannot have a trusted publisher attached to it. `changeset publish`
+detects the OIDC token, finds no npm package to match it against, and falls back
+to needing auth:
+
+```
+No NPM_TOKEN found, but OIDC is available - using npm trusted publishing
+error: ENEEDAUTH This command requires you to be logged in to https://registry.npmjs.org
+```
+
+So the first release goes out with an `NPM_TOKEN`. After that the package exists,
+a trusted publisher can be configured for it, and the secret can be deleted.
+
+PyPI has no such bootstrap problem: a trusted publisher there can be created for
+a project name that does not exist yet.
 
 ### If the release cannot open its pull request
 
