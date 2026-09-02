@@ -361,6 +361,16 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 
 ## M7 — Compliance *(v1.3)*
 
+> **Status: crypto-shredding implemented.** AES-256-GCM with per-subject keys,
+> envelope-wrapped so the database never holds usable key material, and each
+> ciphertext bound to its table, row, and column so a value cannot be silently
+> relocated. Destroying one key renders every ciphertext for that subject
+> unreadable at once without touching a history row, so the hash chain stays
+> valid.
+>
+> **Remaining:** wiring PII column designation and subject resolution into the
+> store, external anchoring, commit signing, and the TypeScript and Python SDKs.
+
 | Unit | Design ref | Notes |
 |---|---|---|
 | **M7.1 Crypto-shredding** | §13.3 | PII designation; per-subject DEK under KMS envelope; **sidecar-only encryption, live table plaintext**; `EraseSubject` = live-row deletion commit + DEK destruction + erasure-fact commit; `erased` markers on historical reads. |
