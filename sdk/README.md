@@ -160,18 +160,33 @@ npm error code EOTP
 npm error This operation requires a one-time password from your authenticator.
 ```
 
-Only two kinds work unattended:
-
 | Token | Works in CI? |
 |---|---|
-| Classic → **Automation** | **yes** — exists precisely to bypass 2FA for CI |
-| **Granular access token** | **yes** — scope it to the `@glyphsoftware` packages, read and write |
-| Classic → **Publish** | no — still prompts for an OTP |
+| **Granular access token** | **yes** — this is the one to use |
+| Classic → Automation | yes, but npm no longer offers this on newer accounts |
+| Classic → Publish | no — still prompts for an OTP |
 | Classic → Read-only | no |
 
 The failure is late and looks like a permissions problem: the token authenticates,
 the provenance statement is signed and logged, and only then does the registry
 reject the upload. Nothing is published when this happens.
+
+**Creating the granular token**, at
+[npmjs.com/settings/~/tokens/new](https://www.npmjs.com/settings/~/tokens/new):
+
+- **Packages and scopes** → Permissions: **Read and write**.
+- **Select packages**: choose **All packages**, not "Only select packages". The
+  package does not exist yet, so it cannot appear in the picker — a token scoped
+  to selected packages therefore cannot create it, and the publish fails with 403.
+  Narrow the token to the package after the first release if you want.
+- **Organizations** → **Read and write**, if `@glyphsoftware` is an npm
+  organization. Creating a *new* package inside an org scope needs it.
+- Note the **expiry**. A granular token always has one, so the release will start
+  failing on a date rather than gradually.
+
+`@glyphsoftware` also has to exist as an npm organization before anything can be
+published into it — a scope is not created implicitly by a publish the way a
+user scope is.
 
 ### The first publish needs a token even if you want OIDC
 
