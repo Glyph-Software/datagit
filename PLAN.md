@@ -42,9 +42,6 @@ What is **not** done, stated plainly rather than left to be discovered:
   SQL still assumes PostgreSQL placeholders in places, and M5.3 has not measured
   MySQL against the S1 workloads — its performance targets remain unmeasured and
   must not be assumed.
-- **REST gateway** (M1.10 partial). gRPC is complete; grpc-gateway is not wired.
-- **Partitioning and performance regression gates** (M4.5, M4.6). OIDC is an
-  Authenticator implementation away; API keys ship.
 - **Schema changes through the branch and proposal flow** (M6). The schema
   engine plans and applies; it is not yet wired to merges.
 - **PII designation and the TypeScript/Python SDKs** (M7).

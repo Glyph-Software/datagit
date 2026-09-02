@@ -34,10 +34,16 @@ import (
 
 func main() {
 	var (
-		dsn     = flag.String("dsn", env("DATAGIT_DSN", ""), "PostgreSQL DSN")
+		dsn = flag.String("dsn", env("DATAGIT_DSN", ""),
+			"database DSN; the engine is detected from it (PostgreSQL or MySQL)")
 		addr    = flag.String("addr", env("DATAGIT_ADDR", ":8433"), "gRPC listen address")
 		admin   = flag.String("admin-addr", env("DATAGIT_ADMIN_ADDR", ":8434"), "health and metrics address")
 		keyFile = flag.String("api-keys", env("DATAGIT_API_KEYS", ""), "JSON file of API keys")
+
+		// The REST surface is off unless asked for. It calls the same handlers as
+		// gRPC, so enabling it adds a protocol, not a second authorization path.
+		restAddr = flag.String("rest-addr", env("DATAGIT_REST_ADDR", ""),
+			"REST listen address; empty disables it")
 	)
 	flag.Parse()
 
@@ -93,6 +99,13 @@ func main() {
 	// without exposing the data plane.
 	go serveAdmin(*admin, pool, metrics)
 
+	// The REST surface calls the SAME server object, so authorization goes
+	// through the same code path rather than through a second one that has to be
+	// kept in step (§16).
+	if *restAddr != "" {
+		go serveREST(*restAddr, srv)
+	}
+
 	lis, err := net.Listen("tcp", *addr)
 	if err != nil {
 		fatal("listening on %s: %v", *addr, err)
@@ -108,6 +121,23 @@ func main() {
 	}()
 	if err := g.Serve(lis); err != nil {
 		fatal("serving: %v", err)
+	}
+}
+
+// serveREST exposes the REST surface.
+//
+// A separate port from gRPC because the two speak different protocols on the
+// wire; the same handlers behind both, because a policy enforced by only one
+// surface is not a policy.
+func serveREST(addr string, srv *server.Server) {
+	log.Printf("REST listening on %s", addr)
+	s := &http.Server{
+		Addr:              addr,
+		Handler:           srv.RESTHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("REST server stopped: %v", err)
 	}
 }
 
