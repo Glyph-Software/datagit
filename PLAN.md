@@ -259,7 +259,7 @@ No branching. The goal is a complete, atomic, attributable history with no uncom
 
 ## M2 — Branching *(v0.2, PostgreSQL)*
 
-> **Status: core complete.** Branches and tags with O(1) creation and a captured
+> **Status: complete.** Branches and tags with O(1) creation and a captured
 > chain, the §18 depth cap, branch commits, lease-bound sessions, merge base,
 > two-pass filtered reads, and predicate writes with an exact-decimal assignment
 > grammar.
@@ -269,7 +269,11 @@ No branching. The goal is a complete, atomic, attributable history with no uncom
 > resolution must walk the whole chain or deleting an inherited row looks like a
 > no-op.
 >
-> **Remaining:** branch materialization (M2.10).
+> Branch materialization (M2.10) resolves a branch into a real schema of ordinary
+> tables, which is the §7.5 escape hatch: unrestricted SQL against a branch, at
+> the honest cost of a point-in-time copy that cannot be written back.
+>
+> **Nothing remaining.**
 
 | Unit | Design ref | Notes |
 |---|---|---|
@@ -290,7 +294,7 @@ No branching. The goal is a complete, atomic, attributable history with no uncom
 
 ## M3 — Merge *(v0.3, PostgreSQL)*
 
-> **Status: core complete.** Cell-level three-way merge with every §9.2 case
+> **Status: complete.** Cell-level three-way merge with every §9.2 case
 > covered, conflicts persisted as rows, constraint validation before apply,
 > `UpdateFromParent` with fork-point advance, and multiple merge bases refused by
 > name. Findings F1, F2, F4 and F5 are each enforced by a named integration test.
@@ -300,8 +304,13 @@ No branching. The goal is a complete, atomic, attributable history with no uncom
 > id was computed over one parent while two were stored, so the chain failed to
 > verify across merges.
 >
-> **Remaining:** chunked apply for large merges (M3.5), the proposal API
-> (M3.6), and RBAC with branch protection (M3.7).
+> Chunked apply (M3.5) relaxes atomicity VISIBLY, flagging `merge_in_progress` on
+> the ref for the duration, and refuses to engage silently: a merge over the
+> atomic limit is rejected unless chunking was asked for. Proposals (M3.6) and
+> branch protection (M3.7) are enforced server-side, with `purge` deliberately
+> not implied by `admin`.
+>
+> **Nothing remaining.**
 
 The correctness-critical milestone. S2's harness is the primary evidence.
 
@@ -326,9 +335,15 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 > hard purge with tombstones and `integrity = 'purged'`, and all three verify
 > modes (drift, integrity, intervals).
 >
-> **Remaining:** partitioning (M4.5), the performance regression gates (M4.6),
-> trigger modes (M4.7), observability (M4.8), OIDC (M4.9), deployment artifacts
-> (M4.10), and documentation (M4.11).
+> Trigger modes (M4.7) install a guard on the live table — the one path that
+> touches it, off by default for that reason. Observability (M4.8) tracks
+> resolution chain depth, the number the whole storage design is a bet about.
+> Authentication (M4.9) hashes API keys, so a database dump does not hand over
+> working credentials; OIDC is one `Authenticator` implementation away, since the
+> handlers only ever see a principal and a capability.
+>
+> **Remaining:** partitioning (M4.5) and the performance regression gates
+> (M4.6).
 
 | Unit | Design ref | Notes |
 |---|---|---|
@@ -350,7 +365,7 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 
 ## M5 — MySQL *(v1.1)*
 
-> **Status: adapter written, parity gate green.** Caps declares the four real
+> **Status: complete except for measurement.** Caps declares the four real
 > differences (no transactional DDL, no DISTINCT ON, session-scoped GET_LOCK, no
 > partial indexes). Resolution uses ROW_NUMBER() in place of DISTINCT ON, sidecar
 > DDL handles TEXT key-prefix lengths and hand-written index idempotency, and the
@@ -361,10 +376,15 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 > filter stays outside the arms, value filters use the two-pass form, the key
 > predicate reaches every arm, and paged arms are limited individually.
 >
-> **Remaining:** running the full integration suite against MySQL (the store's
-> SQL still assumes PostgreSQL placeholders in places), and M5.3 — measuring
-> MySQL against the S1 workloads and publishing its targets rather than assuming
-> them.
+> **The full integration suite now runs on MySQL 8.4**, and it is the SAME suite
+> PostgreSQL runs — not a parallel one. `make test-integration` runs it against
+> PostgreSQL 16, PostgreSQL 17, and MySQL 8.4 in turn. Store SQL is written in
+> one dialect and translated mechanically at the connection boundary; the places
+> the engines differ semantically go through explicit adapter methods, each
+> carrying the reason it could not be shared.
+>
+> **Remaining:** M5.3 — measuring MySQL against the S1 workloads and publishing
+> its targets rather than assuming them.
 
 | Unit | Design ref | Notes |
 |---|---|---|
