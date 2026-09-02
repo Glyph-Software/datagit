@@ -87,7 +87,18 @@ jobs:
           title: "Release: version the SDK packages"
           commit: "Version the SDK packages"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # CHANGESETS_TOKEN when it exists, the built-in token otherwise.
+          #
+          # An organization policy can forbid GitHub Actions from creating pull
+          # requests, and when it does the built-in token gets a 403 at the last
+          # step of an otherwise successful run — the version commit is pushed and
+          # then nothing opens a pull request for it. That restriction applies to
+          # the Actions token, not to a user token, so a PAT with `contents: write`
+          # and `pull-requests: write` routes around it without any org change.
+          #
+          # A PAT also makes the version pull request run its own checks, which a
+          # pull request opened by the built-in token deliberately does not.
+          GITHUB_TOKEN: ${{ secrets.CHANGESETS_TOKEN || secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
 

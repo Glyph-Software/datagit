@@ -149,3 +149,25 @@ Neither is needed until the first release.
 
 The `pypi` environment should be created in repository settings, with required
 reviewers if you want a human gate in front of the upload itself.
+
+### If the release cannot open its pull request
+
+`changesets/action` pushes the version commit and then opens a pull request for
+it. That second step fails with
+
+> GitHub Actions is not permitted to create or approve pull requests
+
+when the organization forbids it. The repository-level setting is locked in that
+case — changing it returns `409 Conflict` — so it has to be fixed in one of two
+places:
+
+- **Organization settings** → Actions → General → Workflow permissions → *Allow
+  GitHub Actions to create and approve pull requests*. Needs an org owner.
+- **Or add a `CHANGESETS_TOKEN` secret**: a fine-grained PAT scoped to this
+  repository with `contents: write` and `pull-requests: write`. The restriction
+  applies to the Actions token, not a user token, so this works with no org
+  change. The workflow already prefers it when present.
+
+Either way the version commit itself is safe: it is pushed to
+`changeset-release/main` before the failure, so nothing is lost — a pull request
+opened by hand from that branch releases exactly the same thing.
