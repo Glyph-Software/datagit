@@ -187,6 +187,30 @@ feature, the feature is not specified well enough to build yet.
 
 ---
 
+## Changing an SDK or the proto
+
+Two things are easy to forget and both are caught by CI.
+
+**Regenerate the stubs.** They are committed, so they can silently fall behind
+the proto — and an SDK whose stubs disagree with the service fails at a
+customer's runtime rather than in your build.
+
+```bash
+make check-sdk-stubs    # regenerates and diffs; run it before you push
+```
+
+**Record a changeset**, so the change is released rather than sitting on `main`:
+
+```bash
+make changeset
+```
+
+The two SDKs share one version and release together; `sdk/README.md` explains
+why, and what to do if a release half-fails. A change to the canonical encoding
+is always a **major**, even when the SDK API is untouched.
+
+---
+
 ## Adding an engine
 
 The adapter boundary is `internal/adapter`. A new engine implements
@@ -240,11 +264,15 @@ services configured:
 - `make test-integration` — the 80-test suite, on all three engines
 - `make test-bench` — the performance gates
 - `make test-acceptance` — the README tour
-- `make test-sdk-py`, `make test-sdk-ts`
 
 **Run these locally before opening a pull request.** A green CI badge on this
 repository does not currently mean the engines were exercised, and that gap is
 stated here rather than left to be discovered.
+
+The SDKs *are* covered, by [.github/workflows/sdk.yml](.github/workflows/sdk.yml):
+both test suites, the stub-drift check, and an assertion that the two SDK
+versions have not drifted apart. Releases run from
+[.github/workflows/sdk-release.yml](.github/workflows/sdk-release.yml).
 
 ---
 

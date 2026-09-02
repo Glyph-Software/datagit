@@ -1,0 +1,119 @@
+name: SDK
+
+# Checks for the two SDKs. They run on every change to the proto, the SDKs, or
+# the machinery that generates and versions them — and not on a change to the Go
+# store, which cannot affect them.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api/proto/**"
+      - "sdk/**"
+      - "scripts/sync-python-version.mjs"
+      - "buf.gen.ts.yaml"
+      - "buf.yaml"
+      - ".github/workflows/sdk.yml"
+  pull_request:
+    # Repeated rather than a YAML anchor: GitHub Actions does not support
+    # anchors, and a workflow that silently never triggers is worse than six
+    # duplicated lines.
+    paths:
+      - "api/proto/**"
+      - "sdk/**"
+      - "scripts/sync-python-version.mjs"
+      - "buf.gen.ts.yaml"
+      - "buf.yaml"
+      - ".github/workflows/sdk.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - run: npm ci
+      - name: Typecheck and test
+        run: npm test
+
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest tests/ -q
+
+  versions-agree:
+    # The two SDKs release on one version number, so a hand-edited version in
+    # either is caught here rather than at publish time, when it would put two
+    # different SDKs on registries claiming to be the same release.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node scripts/sync-python-version.mjs --check
+
+  stubs-match-the-proto:
+    # The generated stubs are COMMITTED, so they can silently fall behind the
+    # proto — and an SDK whose stubs disagree with the service is worse than one
+    # that fails to build, because it fails at a customer's runtime instead.
+    #
+    # This regenerates and diffs. Both generators are PINNED EXACTLY: each embeds
+    # its own version in a banner, so an unpinned patch bump would fail this
+    # check for a reason unrelated to the change under review.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+
+      - name: Regenerate the TypeScript stubs
+        run: |
+          npm ci --prefix sdk/typescript
+          buf generate --template buf.gen.ts.yaml
+
+      - name: Regenerate the Python stubs
+        run: |
+          pip install "grpcio-tools==1.83.1"
+          python -m grpc_tools.protoc -Iapi/proto \
+            --python_out=sdk/python --grpc_python_out=sdk/python --pyi_out=sdk/python \
+            api/proto/datagit/v1/datagit.proto
+
+      - name: The committed stubs must match
+        run: |
+          if ! git diff --exit-code -- sdk/typescript/src/gen sdk/python/datagit/v1; then
+            echo
+            echo "The committed stubs do not match api/proto/datagit/v1/datagit.proto."
+            echo "Regenerate them and commit the result:"
+            echo
+            echo "    make sdk-ts"
+            echo "    make sdk-py"
+            exit 1
+          fi
+          echo "the committed stubs match the proto"

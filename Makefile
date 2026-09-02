@@ -8,6 +8,11 @@ PG17_DSN ?= postgres://datagit:datagit@localhost:55417/datagit
 PG16_DSN ?= postgres://datagit:datagit@localhost:55416/datagit
 MYSQL_DSN ?= datagit:datagit@tcp(127.0.0.1:55484)/datagit?multiStatements=true
 
+# The Python SDK's tooling. Point this at a virtualenv when the system Python is
+# externally managed, which most are:
+#   make sdk-py PYTHON=.venv/bin/python
+PYTHON ?= python3
+
 # Number of random operation sequences for the differential harness.
 # 170000 x 60 ops is roughly 10M operations, the Phase 0 S2 bar.
 SEQUENCES ?= 5000
@@ -73,14 +78,14 @@ test-integration-mysql: ## Integration tests against MySQL 8.4
 	DATAGIT_TEST_DSN="$(MYSQL_DSN)" go test ./test/integration/ -count=1
 
 .PHONY: sdk-py
-sdk-py: ## Regenerate the Python SDK stubs from the proto
-	python3 -m grpc_tools.protoc -Iapi/proto \
+sdk-py: ## Regenerate the Python SDK stubs from the proto (PYTHON=... for a venv)
+	$(PYTHON) -m grpc_tools.protoc -Iapi/proto \
 	  --python_out=sdk/python --grpc_python_out=sdk/python --pyi_out=sdk/python \
 	  api/proto/datagit/v1/datagit.proto
 
 .PHONY: test-sdk-py
-test-sdk-py: ## Python SDK tests
-	cd sdk/python && python3 -m pytest tests/ -q
+test-sdk-py: ## Python SDK tests (PYTHON=... for a venv)
+	cd sdk/python && $(PYTHON) -m pytest tests/ -q
 
 .PHONY: sdk-ts
 sdk-ts: ## Regenerate the TypeScript SDK stubs from the proto
@@ -90,6 +95,29 @@ sdk-ts: ## Regenerate the TypeScript SDK stubs from the proto
 .PHONY: test-sdk-ts
 test-sdk-ts: ## TypeScript SDK tests
 	cd sdk/typescript && npm test
+
+.PHONY: changeset
+changeset: ## Record a version bump for the SDKs (both move together)
+	cd sdk/typescript && npx changeset
+
+.PHONY: sdk-version
+sdk-version: ## Apply queued changesets: bump both SDKs and write the changelog
+	cd sdk/typescript && npm run version-packages
+
+.PHONY: check-sdk-versions
+check-sdk-versions: ## Fail if the two SDK versions have drifted apart
+	node scripts/sync-python-version.mjs --check
+
+.PHONY: check-sdk-stubs
+check-sdk-stubs: ## Fail if the committed stubs no longer match the proto
+	@$(MAKE) --no-print-directory sdk-ts sdk-py
+	@if ! git diff --exit-code -- sdk/typescript/src/gen sdk/python/datagit/v1; then \
+	  echo; \
+	  echo "The committed stubs do not match api/proto/datagit/v1/datagit.proto."; \
+	  echo "Commit the regenerated files above."; \
+	  exit 1; \
+	fi; \
+	echo "ok: the committed stubs match the proto"
 
 .PHONY: test-bench
 test-bench: ## Performance regression gates on every engine (M4.6, M5.3)
