@@ -134,9 +134,22 @@ npm and PyPI are published in that order and the two uploads are **not atomic**;
 no arrangement of CI would make them so. If the PyPI job fails after npm has
 published, npm is ahead.
 
-**Re-run the PyPI job.** The version on `main` is already correct and PyPI has
-nothing at that version yet. Do not cut a new version to route around it — that
-would leave a released npm version with no Python counterpart forever.
+**Run the release workflow manually with `publish_pypi` ticked**
+([Actions → SDK Release → Run workflow](https://github.com/Glyph-Software/datagit/actions/workflows/sdk-release.yml)),
+or:
+
+```bash
+gh workflow run sdk-release.yml -f publish_pypi=true
+```
+
+A plain re-run will *not* work, and the reason is worth knowing: after npm has
+published there is nothing left for it to publish, so the release job reports
+`published=false` and the PyPI job skips. The dispatch input exists precisely to
+break that deadlock. The job is idempotent — a version already on PyPI is skipped
+rather than re-uploaded — so running it when unsure is safe.
+
+Do not cut a new version to route around a half-completed release. That leaves a
+released npm version with no Python counterpart forever.
 
 ## One-time repository setup
 

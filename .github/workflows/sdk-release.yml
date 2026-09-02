@@ -27,6 +27,11 @@ on:
       - "package-lock.json"
       - ".github/workflows/sdk-release.yml"
   workflow_dispatch:
+    inputs:
+      publish_pypi:
+        description: "Publish the current sdk/python version to PyPI, without npm having just published. Recovery for a release where npm succeeded and PyPI did not."
+        type: boolean
+        default: false
 
 concurrency:
   # Never two releases at once. A second run mid-publish could push a version the
@@ -127,16 +132,20 @@ jobs:
           echo "published SDK $v to npm"
 
   pypi:
-    # The Python package goes out only after npm succeeded, on the same commit
-    # and therefore the same version.
+    # The Python package goes out after npm succeeded, on the same commit and
+    # therefore the same version.
     #
-    # The two uploads are NOT atomic, and no arrangement of CI would make them
-    # so. If this job fails after npm has published, npm is ahead: re-run this
-    # job, because the version on main is already correct and PyPI has nothing at
-    # that version yet. Do not cut a new version to paper over it — that would
-    # leave a released npm version with no Python counterpart forever.
+    # The two uploads are NOT atomic and no arrangement of CI would make them so,
+    # which means the recovery path has to be real rather than aspirational. It
+    # runs when npm has just published, AND on a manual dispatch with
+    # publish_pypi set — because after a half-completed release npm has nothing
+    # left to publish, so a plain re-run reports published=false and this job
+    # would skip forever, leaving PyPI permanently behind.
+    #
+    # It is also idempotent: a version already on PyPI is skipped rather than
+    # re-uploaded, so running it twice is harmless.
     needs: release
-    if: needs.release.outputs.published == 'true'
+    if: always() && (needs.release.outputs.published == 'true' || inputs.publish_pypi)
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -154,22 +163,38 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Confirm the checkout carries the version that was published to npm
+      - name: Work out what would be published
+        id: v
         run: |
-          want='${{ needs.release.outputs.version }}'
-          got=$(grep -m1 '^version *= *"' sdk/python/pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
-          if [ "$got" != "$want" ]; then
-            echo "npm published $want but this checkout of sdk/python is $got."
+          version=$(grep -m1 '^version *= *"' sdk/python/pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sdk/python is at $version"
+
+          # When npm published in this same run, the two must agree. On a
+          # recovery dispatch there is no npm version to compare against.
+          npm_version='${{ needs.release.outputs.version }}'
+          if [ -n "$npm_version" ] && [ "$npm_version" != "$version" ]; then
+            echo "npm published $npm_version but sdk/python is $version."
             echo "Publishing would put a different version on PyPI than on npm."
             exit 1
           fi
-          echo "sdk/python is at $got, matching npm"
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://pypi.org/pypi/datagit-sdk/$version/json")
+          if [ "$code" = "200" ]; then
+            echo "PyPI already has datagit-sdk $version; nothing to do."
+            echo "already=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build the distributions
+        if: steps.v.outputs.already != 'true'
         run: |
           python -m pip install --upgrade build
           python -m build sdk/python
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+        if: steps.v.outputs.already != 'true'
         with:
           packages-dir: sdk/python/dist
