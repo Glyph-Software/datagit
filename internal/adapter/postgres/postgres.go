@@ -530,9 +530,45 @@ func uuidString(u [16]byte) string {
 	return string(buf)
 }
 
-// MaterializeBranch and ApplyMigration land with M2.10 and M6 respectively.
+// MaterializeBranch writes a branch's resolved state into real tables in a new
+// schema (§7.5).
+//
+// This is the deliberate escape hatch that lets "not a query engine" stand:
+// rather than building one, DataGit hands the problem to the one already
+// present. The result is ordinary tables any client can query with unrestricted
+// SQL — joins, aggregates, a BI tool, the application's own ORM.
+//
+// It is a COPY. It costs time and storage proportional to the data, it is a
+// point-in-time snapshot, and it is not writable back into the branch.
 func (a *Adapter) MaterializeBranch(ctx context.Context, tx adapter.Tx, chain []adapter.Segment, t *adapter.TableSpec, into string) error {
-	return fmt.Errorf("postgres: MaterializeBranch lands in M2.10")
+	spec := &adapter.ResolveSpec{Table: t, Chain: chain}
+	q, err := a.ResolveQuery(spec)
+	if err != nil {
+		return err
+	}
+	cols := make([]string, 0, len(t.Columns))
+	for _, c := range t.Columns {
+		cols = append(cols, fmt.Sprintf("%s AS %s",
+			quoteIdent(catalog.SidecarColumn(uint32(c.ID))), quoteIdent(c.Name)))
+	}
+	// The resolve query returns op as its last column; project it away and give
+	// the columns back their real names, so the result looks exactly like the
+	// live table.
+	sql := fmt.Sprintf(`CREATE TABLE %s.%s AS SELECT %s FROM (%s) m`,
+		quoteIdent(into), quoteIdent(t.PhysicalName), strings.Join(cols, ", "), q.SQL)
+	if err := tx.Exec(ctx, sql, q.Args...); err != nil {
+		return fmt.Errorf("materialize %s: %w", t.PhysicalName, err)
+	}
+	pk := make([]string, 0, len(t.PKColumns))
+	for _, id := range t.PKColumns {
+		for _, c := range t.Columns {
+			if c.ID == id {
+				pk = append(pk, quoteIdent(c.Name))
+			}
+		}
+	}
+	return tx.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s.%s ADD PRIMARY KEY (%s)`,
+		quoteIdent(into), quoteIdent(t.PhysicalName), strings.Join(pk, ", ")))
 }
 
 func (a *Adapter) ApplyMigration(ctx context.Context, plan *adapter.MigrationPlan, j adapter.Journal) error {
