@@ -144,11 +144,34 @@ Neither is needed until the first release.
 
 | | |
 |---|---|
-| **npm** | The `@glyphsoftware` scope must exist on npm, and an `NPM_TOKEN` repository secret must have publish rights on it. Use a **granular access token**, not a classic automation token. The workflow publishes with [provenance](https://docs.npmjs.com/generating-provenance-statements), so it also needs `id-token: write` — already set. |
+| **npm** | The `@glyphsoftware` scope must exist on npm, and an `NPM_TOKEN` repository secret must have publish rights on it. **The token type matters** — see below. The workflow publishes with [provenance](https://docs.npmjs.com/generating-provenance-statements), so it also needs `id-token: write` — already set. |
 | **PyPI** | A [trusted publisher](https://docs.pypi.org/trusted-publishers/) for `datagit`: owner `Glyph-Software`, repository `datagit`, workflow `sdk-release.yml`, environment `pypi`. No token, so there is no long-lived credential to leak. Confirm `datagit-sdk` is free before the first release, not after: the two registries publish in sequence and are not atomic, so a taken name fails the PyPI half once npm has already gone out.|
 
 The `pypi` environment should be created in repository settings, with required
 reviewers if you want a human gate in front of the upload itself.
+
+### The npm token has to be one that bypasses two-factor auth
+
+If the npm account requires 2FA for write actions — the default for a while now —
+most token types still demand a one-time password, and CI has no authenticator:
+
+```
+npm error code EOTP
+npm error This operation requires a one-time password from your authenticator.
+```
+
+Only two kinds work unattended:
+
+| Token | Works in CI? |
+|---|---|
+| Classic → **Automation** | **yes** — exists precisely to bypass 2FA for CI |
+| **Granular access token** | **yes** — scope it to the `@glyphsoftware` packages, read and write |
+| Classic → **Publish** | no — still prompts for an OTP |
+| Classic → Read-only | no |
+
+The failure is late and looks like a permissions problem: the token authenticates,
+the provenance statement is signed and logged, and only then does the registry
+reject the upload. Nothing is published when this happens.
 
 ### The first publish needs a token even if you want OIDC
 
