@@ -550,3 +550,77 @@ func bytesToMask(b []byte) core.ColMask {
 }
 
 var _ = postgres.MaxSeq
+
+// ListTables returns every tracked table in a repository.
+func (s *Store) ListTables(ctx context.Context, repo *Repo) ([]*Table, error) {
+	rows, err := s.pool.Direct().Query(ctx,
+		`SELECT physical_name FROM datagit_table WHERE repo_id=$1 ORDER BY physical_name`, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]*Table, 0, len(names))
+	for _, n := range names {
+		t, err := s.LoadTable(ctx, repo, n)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// CommitRecord is one entry of the commit log.
+type CommitRecord struct {
+	ID          hash.Digest
+	Seq         int64
+	Author      string
+	CommittedAt time.Time
+	Message     string
+	ExternalRef string
+	Integrity   string
+}
+
+// Log returns a branch's commits, newest first.
+func (s *Store) Log(ctx context.Context, repo *Repo, branch string, limit int) ([]CommitRecord, error) {
+	tx := s.pool.Direct()
+	branchID, _, _, _, err := s.loadRef(ctx, tx, repo, branch)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT id, seq, author, committed_at, message, external_ref, integrity
+		   FROM datagit_commit WHERE repo_id=$1 AND branch_id=$2
+		  ORDER BY seq DESC LIMIT $3`, repo.ID, branchID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CommitRecord
+	for rows.Next() {
+		var r CommitRecord
+		var id []byte
+		if err := rows.Scan(&id, &r.Seq, &r.Author, &r.CommittedAt,
+			&r.Message, &r.ExternalRef, &r.Integrity); err != nil {
+			return nil, err
+		}
+		copy(r.ID[:], id)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

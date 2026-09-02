@@ -2,13 +2,15 @@
 // THROWAWAY spike code — not part of the shipped tree.
 //
 // Answers two questions:
-//   1. Is the DESIGN.md §5.2c / §14.2 estimate real — ~2x the data plus indexes,
-//      3-4x at rest before any history?
-//   2. Does partition-drop pruning beat row deletion by an order of magnitude
-//      (§14.3)?
 //
-//	go run ./spikes/s5_storage -mode sizes
-//	go run ./spikes/s5_storage -mode pruning
+//  1. Is the DESIGN.md §5.2c / §14.2 estimate real — ~2x the data plus indexes,
+//     3-4x at rest before any history?
+//
+//  2. Does partition-drop pruning beat row deletion by an order of magnitude
+//     (§14.3)?
+//
+//     go run ./spikes/s5_storage -mode sizes
+//     go run ./spikes/s5_storage -mode pruning
 package main
 
 import (

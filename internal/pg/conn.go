@@ -85,7 +85,7 @@ func (t *poolTx) QueryRow(ctx context.Context, sql string, args ...any) adapter.
 
 type pgxRows struct{ r pgx.Rows }
 
-func (r *pgxRows) Next() bool                { return r.r.Next() }
-func (r *pgxRows) Scan(dest ...any) error    { return r.r.Scan(dest...) }
-func (r *pgxRows) Close()                    { r.r.Close() }
-func (r *pgxRows) Err() error                { return r.r.Err() }
+func (r *pgxRows) Next() bool             { return r.r.Next() }
+func (r *pgxRows) Scan(dest ...any) error { return r.r.Scan(dest...) }
+func (r *pgxRows) Close()                 { r.r.Close() }
+func (r *pgxRows) Err() error             { return r.r.Err() }

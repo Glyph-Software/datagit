@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -565,4 +566,104 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestRevertCreatesANewCommit: a revert must undo by adding history, never by
+// rewriting or erasing it (M1.8, §16.1).
+func TestRevertCreatesANewCommit(t *testing.T) {
+	f := setup(t)
+	target, err := f.store.Commit(f.ctx, store.CommitRequest{
+		Repo: f.repo, Table: f.table, Branch: store.DefaultBranch, Author: principal,
+		Message: "raise the price",
+		Changes: []store.Change{{PK: f.pk(t, "TENT-4P"), Op: core.OpUpdate,
+			Row: f.row("TENT-4P", "Four-person tent", "outdoor", "268.92", "2026-08-14T00:00:00Z")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.store.Revert(f.ctx, f.repo, f.table, store.DefaultBranch,
+		target.ID, principal, "roll it back", false); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+
+	if got := f.livePrice(t, "TENT-4P"); got != "249.00" {
+		t.Errorf("live price after revert is %s, want 249.00", got)
+	}
+	// The reverted commit is still in history: nothing was erased.
+	hist, err := f.store.History(f.ctx, f.repo, f.table, store.DefaultBranch, f.pk(t, "TENT-4P"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 3 { // import, the change, the revert
+		t.Errorf("history has %d versions after a revert, want 3 (a revert adds, never erases)", len(hist))
+	}
+	if err := f.store.VerifyIntegrity(f.ctx, f.repo, store.DefaultBranch); err != nil {
+		t.Errorf("hash chain broken by revert: %v", err)
+	}
+}
+
+// TestRevertRefusesToDiscardLaterWork: undoing a commit whose rows have since
+// changed again would silently drop the newer value, so it is refused by
+// default rather than guessed.
+func TestRevertRefusesToDiscardLaterWork(t *testing.T) {
+	f := setup(t)
+	target, err := f.store.Commit(f.ctx, store.CommitRequest{
+		Repo: f.repo, Table: f.table, Branch: store.DefaultBranch, Author: principal,
+		Message: "first",
+		Changes: []store.Change{{PK: f.pk(t, "TENT-4P"), Op: core.OpUpdate,
+			Row: f.row("TENT-4P", "Four-person tent", "outdoor", "255.00", "2026-05-01T00:00:00Z")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Commit(f.ctx, store.CommitRequest{
+		Repo: f.repo, Table: f.table, Branch: store.DefaultBranch, Author: principal,
+		Message: "second, on the same row",
+		Changes: []store.Change{{PK: f.pk(t, "TENT-4P"), Op: core.OpUpdate,
+			Row: f.row("TENT-4P", "Four-person tent", "outdoor", "268.92", "2026-08-14T00:00:00Z")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = f.store.Revert(f.ctx, f.repo, f.table, store.DefaultBranch,
+		target.ID, principal, "", false)
+	if err == nil {
+		t.Fatal("reverting a commit whose row changed again must be refused by default")
+	}
+	if !contains(err.Error(), "later changes") {
+		t.Errorf("the refusal should say what it would discard, got: %v", err)
+	}
+	// force proceeds, having said what it would do.
+	if _, err := f.store.Revert(f.ctx, f.repo, f.table, store.DefaultBranch,
+		target.ID, principal, "", true); err != nil {
+		t.Fatalf("forced revert: %v", err)
+	}
+}
+
+// TestExportRoundTripsTheEncoding: the export names the frozen encoding it was
+// written under, so an archive read years later can be interpreted.
+func TestExportRoundTripsTheEncoding(t *testing.T) {
+	f := setup(t)
+	if _, err := f.store.Commit(f.ctx, store.CommitRequest{
+		Repo: f.repo, Table: f.table, Branch: store.DefaultBranch, Author: principal,
+		Message: "a change",
+		Changes: []store.Change{{PK: f.pk(t, "MUG-01"), Op: core.OpUpdate,
+			Row: f.row("MUG-01", "Enamel mug", "kitchen", "14.00", "2026-08-14T00:00:00Z")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	if err := f.store.Export(f.ctx, f.repo, f.table, store.DefaultBranch, &buf); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		`"kind":"header"`, `"encoding":"datagit.commit.v1"`,
+		`"kind":"column"`, `"kind":"commit"`, `"kind":"version"`,
+	} {
+		if !contains(out, want) {
+			t.Errorf("export is missing %s", want)
+		}
+	}
 }

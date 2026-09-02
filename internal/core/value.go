@@ -64,7 +64,7 @@ func (k Kind) String() string {
 type Value struct {
 	Kind  Kind
 	Bool  bool
-	Int   int64  // KindInt; also microseconds for KindTime
+	Int   int64 // KindInt; also microseconds for KindTime
 	Float float64
 	Text  string // KindText, and the normalized decimal for KindNumeric
 	Bytes []byte
