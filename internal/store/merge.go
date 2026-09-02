@@ -120,6 +120,26 @@ func (s *Store) Merge(ctx context.Context, repo *Repo, t *Table, from, into, aut
 	}
 	sort.Slice(res.Changes, func(i, j int) bool { return res.Changes[i].PK < res.Changes[j].PK })
 
+	// §9.3: validate against the target's REAL constraints before applying.
+	// Merging into the default branch writes the live table, so an invalid merge
+	// would otherwise be rejected by the database mid-apply with a partial
+	// result. Violations become first-class conflicts alongside the cell ones.
+	if res.Clean {
+		violations, err := s.ValidateMerge(ctx, repo, t, into, res.Changes)
+		if err != nil {
+			return nil, fmt.Errorf("merge validation: %w", err)
+		}
+		for _, v := range violations {
+			res.Clean = false
+			for _, pk := range v.PKs {
+				res.Conflicts = append(res.Conflicts, core.Conflict{
+					PK: pk, Kind: core.ConflictConstraint,
+					Base: core.Text(v.Kind), Ours: core.Text(v.Detail), Theirs: core.Text(v.Message),
+				})
+			}
+		}
+	}
+
 	if !res.Clean || !apply {
 		return res, nil
 	}

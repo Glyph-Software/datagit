@@ -67,6 +67,10 @@ const (
 	ConflictCell ConflictKind = iota + 1
 	ConflictAddAdd
 	ConflictDeleteModify
+	// ConflictConstraint is a merge result the target's real constraints would
+	// reject (§9.3). It is surfaced like any other conflict rather than letting
+	// the database reject the apply halfway through.
+	ConflictConstraint
 )
 
 func (k ConflictKind) String() string {
@@ -77,6 +81,8 @@ func (k ConflictKind) String() string {
 		return "add_add"
 	case ConflictDeleteModify:
 		return "delete_modify"
+	case ConflictConstraint:
+		return "constraint"
 	}
 	return "?"
 }

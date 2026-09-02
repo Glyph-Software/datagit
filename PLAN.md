@@ -151,6 +151,12 @@ Findings that change specific work units, beyond the DESIGN.md amendments:
 
 ## M0 — Scaffolding
 
+> **Status: complete.** Canonical encoding and `commit_id` frozen as
+> `datagit.commit.v1` and pinned by golden tests; adapter interface and
+> capability matrix defined; Apache 2.0 licence; GitHub Actions CI with the
+> differential harness as a gate and a separate job for the frozen encoding;
+> `buf` configured; Makefile targets.
+
 Everything downstream depends on this. Small, but two items in it are irreversible.
 
 | Unit | Detail |
@@ -223,6 +229,18 @@ No branching. The goal is a complete, atomic, attributable history with no uncom
 
 ## M2 — Branching *(v0.2, PostgreSQL)*
 
+> **Status: core complete.** Branches and tags with O(1) creation and a captured
+> chain, the §18 depth cap, branch commits, lease-bound sessions, merge base,
+> two-pass filtered reads, and predicate writes with an exact-decimal assignment
+> grammar.
+>
+> Two bugs surfaced while porting and are recorded in the commit history: a
+> stored chain must always include the branch itself at index 0, and key
+> resolution must walk the whole chain or deleting an inherited row looks like a
+> no-op.
+>
+> **Remaining:** branch materialization (M2.10).
+
 | Unit | Design ref | Notes |
 |---|---|---|
 | **M2.1 Refs** | §5.3 | Branches and tags; fork points; O(1) creation; segment depth capped at 8. |
@@ -241,6 +259,19 @@ No branching. The goal is a complete, atomic, attributable history with no uncom
 ---
 
 ## M3 — Merge *(v0.3, PostgreSQL)*
+
+> **Status: core complete.** Cell-level three-way merge with every §9.2 case
+> covered, conflicts persisted as rows, constraint validation before apply,
+> `UpdateFromParent` with fork-point advance, and multiple merge bases refused by
+> name. Findings F1, F2, F4 and F5 are each enforced by a named integration test.
+>
+> The merge tests passed on the first run, which is what Phase 0 was for. One
+> real bug was found by a test written to confirm a known gap: the merge commit
+> id was computed over one parent while two were stored, so the chain failed to
+> verify across merges.
+>
+> **Remaining:** chunked apply for large merges (M3.5), the proposal API
+> (M3.6), and RBAC with branch protection (M3.7).
 
 The correctness-critical milestone. S2's harness is the primary evidence.
 
