@@ -20,9 +20,18 @@ const MaxSeq int64 = 9223372036854775807
 // MaxChainDepth caps resolution segments (§18).
 const MaxChainDepth = 8
 
-type Adapter struct{}
+// ExecFunc runs a statement outside any transaction. Migration operations need
+// this because DDL cannot be wrapped in one on every engine (§10.4).
+type ExecFunc func(ctx context.Context, sql string) error
+
+type Adapter struct {
+	exec ExecFunc
+}
 
 func New() *Adapter { return &Adapter{} }
+
+// NewWithExec builds an adapter that can apply migrations.
+func NewWithExec(exec ExecFunc) *Adapter { return &Adapter{exec: exec} }
 
 func (a *Adapter) Dialect() adapter.Dialect { return adapter.PostgreSQL }
 
@@ -569,8 +578,4 @@ func (a *Adapter) MaterializeBranch(ctx context.Context, tx adapter.Tx, chain []
 	}
 	return tx.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s.%s ADD PRIMARY KEY (%s)`,
 		quoteIdent(into), quoteIdent(t.PhysicalName), strings.Join(pk, ", ")))
-}
-
-func (a *Adapter) ApplyMigration(ctx context.Context, plan *adapter.MigrationPlan, j adapter.Journal) error {
-	return fmt.Errorf("postgres: ApplyMigration lands in M6")
 }

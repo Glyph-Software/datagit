@@ -333,6 +333,16 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 
 ## M6 — Schema *(v1.2, both engines)*
 
+> **Status: core complete.** S4 passed, unblocking this. Schema versioning,
+> structural diff with the four-way classification, the full §10.3 merge matrix,
+> migration planning with pre-flight scans and two-phase destructive drops, and
+> the resumable journalled apply wired to the database and verified to resume
+> rather than redo.
+>
+> **Remaining:** wiring schema changes through the branch/proposal flow so a
+> schema merge produces a plan the way §10.4 describes, and the full §10.5
+> sidecar evolution rules including narrowing forks to a new column id.
+
 **Gated by S4.**
 
 | Unit | Design ref | Notes |
