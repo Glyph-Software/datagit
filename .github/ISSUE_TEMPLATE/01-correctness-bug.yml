@@ -1,0 +1,90 @@
+name: Correctness bug (resolution, merge, or hash)
+description: DataGit resolved, merged, or hashed something incorrectly. This outranks everything else.
+title: "Data integrity: "
+labels: ["correctness", "bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A resolution or merge bug is a **data-integrity bug**. Please use this form
+        rather than the general bug report, and say so in the title.
+
+        If the differential harness found it, the seed alone is often enough — it
+        prints a reproducible seed on failure and we can replay it.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: What produced the wrong answer
+      options:
+        - Branch read / resolution chain (§7.3)
+        - Three-way merge or conflict set (§9.2)
+        - Commit hash or canonical encoding (§12.1)
+        - Diff (§8.1)
+        - Blame
+        - UpdateFromParent / fork points (§9.6)
+        - Schema versioning, diff, or migration plan (§10)
+        - Crypto-shredding, anchoring, or signing (§13)
+        - Something else / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: seed
+    attributes:
+      label: Property harness seed
+      description: If `make test-property` or `make test-regressions` found this, paste the seed it printed.
+      placeholder: "seed 8814402931 (sequences=20000 ops=60)"
+
+  - type: textarea
+    id: sequence
+    attributes:
+      label: Operation sequence
+      description: The smallest sequence of operations that reproduces it. A failing test is ideal; prose is fine.
+      placeholder: |
+        1. commit on main: insert (pk=1, name='a', qty=3)
+        2. branch b1 from main
+        3. on b1: update qty=4
+        4. on main: delete pk=1
+        5. merge b1 -> main
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what you got
+      description: Both, explicitly. If a value is wrong, give the value.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engines
+    attributes:
+      label: Which engines reproduce it
+      multiple: true
+      options:
+        - PostgreSQL 16
+        - PostgreSQL 17
+        - MySQL 8.4
+        - Other PostgreSQL version
+        - Other MySQL version
+        - Only the reference model disagrees (no database involved)
+    validations:
+      required: true
+
+  - type: textarea
+    id: version
+    attributes:
+      label: DataGit version and engine versions
+      description: Commit SHA or release, plus `SELECT version()` output if a database is involved.
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: findings
+    attributes:
+      label: Before filing
+      options:
+        - label: I checked [docs/phase0/findings.md](https://github.com/Glyph-Software/datagit/blob/main/docs/phase0/findings.md) — this is not one of the eleven findings already recorded there.

@@ -1,0 +1,82 @@
+name: Bug report
+description: Something else is broken — a crash, a bad error, a build or setup failure, an API that misbehaves.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If DataGit **resolved, merged, or hashed something incorrectly**, close this
+        and use the correctness bug form instead — those are handled differently.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Commands, RPCs, or SDK calls in the order you ran them. Include the DSN shape (not credentials) if setup matters.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The error, log lines, or stack trace, verbatim.
+      render: text
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where you hit it
+      multiple: true
+      options:
+        - CLI (cmd/datagit)
+        - Server (cmd/datagitd) — gRPC
+        - Server (cmd/datagitd) — REST
+        - Python SDK
+        - TypeScript SDK
+        - Build, Makefile, or Docker setup
+        - Test suite
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engines
+    attributes:
+      label: Engines affected
+      multiple: true
+      options:
+        - PostgreSQL 16
+        - PostgreSQL 17
+        - MySQL 8.4
+        - Not engine-specific
+        - Have not checked the others
+    validations:
+      required: true
+
+  - type: textarea
+    id: version
+    attributes:
+      label: Versions
+      description: DataGit commit or release, Go version, engine version, OS.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: refusal
+    attributes:
+      label: If this was a refusal that did not explain itself
+      description: |
+        DataGit refuses things on purpose, but every refusal must name what was refused,
+        why, and what to do instead, with a §N.N reference where one applies. A generic
+        error in place of one of those is a bug even though nothing broke. Paste it here.

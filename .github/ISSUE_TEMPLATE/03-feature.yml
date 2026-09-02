@@ -1,0 +1,82 @@
+name: Feature request
+description: Propose a capability DataGit does not have.
+title: "Feature: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two documents decide most of these before the code exists:
+
+        - **[DESIGN.md](https://github.com/Glyph-Software/datagit/blob/main/DESIGN.md) §19** records what was already considered
+          and rejected, with the reason. Proposing one of those again is fine — proposing
+          it without engaging with §19 is not.
+        - **[DESIGN.md](https://github.com/Glyph-Software/datagit/blob/main/DESIGN.md) §20.1** lists seven open questions, each
+          mapped in [PLAN.md](https://github.com/Glyph-Software/datagit/blob/main/PLAN.md) to the milestone that must close it.
+          If your request is one of them, say so and we can talk about pulling it forward.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and what makes it hard or impossible today. Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you want DataGit to do
+      description: The behaviour you are asking for, concretely. A worked example beats a description.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do instead today
+      description: The workaround, and where it falls down.
+
+  - type: textarea
+    id: rejected
+    attributes:
+      label: Relationship to §19 (already considered and rejected)
+      description: |
+        If §19 covers this or something close to it, name the subsection and say what is
+        different about your case. If you have read §19 and it does not cover this, say that.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: readpath
+    attributes:
+      label: Does this put DataGit on the `main` read path?
+      description: |
+        The live table must stay a clean, schema-unmodified materialization of `main@HEAD` —
+        no added columns, no triggers, no view substitution on the happy path — because
+        application readers query it directly. A proposal that relaxes this is a different
+        product, not a feature.
+      options:
+        - "No — reads on `main` still go straight to the live table with no DataGit hop"
+        - "Not sure"
+        - "Yes, and here is why I think it is worth it (explain below)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engines
+    attributes:
+      label: Can this ship on both engines?
+      description: Every feature ships on PostgreSQL and MySQL. A performance gap is not a capability difference.
+      options:
+        - "Yes, nothing engine-specific about it"
+        - "Not sure — needs a look at the §4.3 capability matrix"
+        - "No — one engine genuinely cannot do it (explain below)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Design sketch, prior art, the §N.N sections you think it touches.

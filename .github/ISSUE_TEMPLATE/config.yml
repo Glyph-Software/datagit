@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: How to contribute
+    url: https://github.com/Glyph-Software/datagit/blob/main/CONTRIBUTING.md
+    about: What will get a change rejected, how to run the suites, and how to add a test. Read before filing a feature request.
+  - name: Design decisions already made
+    url: https://github.com/Glyph-Software/datagit/blob/main/DESIGN.md
+    about: The source of truth. §19 records what was considered and rejected; §20.1 lists the open questions.
+  - name: Phase 0 findings
+    url: https://github.com/Glyph-Software/datagit/blob/main/docs/phase0/findings.md
+    about: Eleven findings, five of them correctness bugs found the hard way. Check here before filing a resolution or merge bug.
