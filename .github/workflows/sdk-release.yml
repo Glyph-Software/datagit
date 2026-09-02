@@ -70,6 +70,19 @@ jobs:
       - name: The SDK versions must agree
         run: node scripts/sync-python-version.mjs --check
 
+      # Identity, before the publish rather than after it fails. An npm publish
+      # that is rejected reports what the REGISTRY objected to, never which
+      # account it objected about, so a token belonging to the wrong user reads
+      # exactly like a token of the wrong type.
+      - name: Who does the npm token authenticate as
+        if: ${{ env.NODE_AUTH_TOKEN != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "npm user:  $(npm whoami 2>&1 || echo '(token did not authenticate)')"
+          echo "orgs this user belongs to:"
+          npm org ls glyphsoftware 2>&1 | head -5 || echo "  (cannot list @glyphsoftware — not a member, or the org does not exist)"
+
       - name: Version or publish
         id: changesets
         uses: changesets/action@v1
