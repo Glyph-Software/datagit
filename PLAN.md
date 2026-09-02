@@ -322,6 +322,22 @@ The correctness-critical milestone. S2's harness is the primary evidence.
 
 ## M5 — MySQL *(v1.1)*
 
+> **Status: adapter written, parity gate green.** Caps declares the four real
+> differences (no transactional DDL, no DISTINCT ON, session-scoped GET_LOCK, no
+> partial indexes). Resolution uses ROW_NUMBER() in place of DISTINCT ON, sidecar
+> DDL handles TEXT key-prefix lengths and hand-written index idempotency, and the
+> same resumable migration state machine runs on both engines.
+>
+> The parity gate compares the two engines on identical input without a database,
+> asserting the structural properties rather than textual equality: the tombstone
+> filter stays outside the arms, value filters use the two-pass form, the key
+> predicate reaches every arm, and paged arms are limited individually.
+>
+> **Remaining:** running the full integration suite against MySQL (the store's
+> SQL still assumes PostgreSQL placeholders in places), and M5.3 — measuring
+> MySQL against the S1 workloads and publishing its targets rather than assuming
+> them.
+
 | Unit | Design ref | Notes |
 |---|---|---|
 | **M5.1 Adapter** | §4.3 | `ROW_NUMBER()` two-pass resolution; `GET_LOCK` with defer + dead-session reaper; `AUTO_INCREMENT`; `varbinary` masks; plain session index; per-engine supported-type list. |
