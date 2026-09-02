@@ -4,9 +4,9 @@
 
 DataGit is a service that sits between your application and your relational database. It gives your data the things Git gives your code — commits, branches, diffs, three-way merges, tags, blame, and a complete, tamper-evident history — without moving your data out of the database you already run.
 
-Your rows stay in your PostgreSQL instance (MySQL follows in v1.1). Your production reads stay on the fast path, hitting the live tables directly with no proxy in between. DataGit owns the *writes*, the *history*, and the *branches*.
+Your rows stay in your own PostgreSQL or MySQL instance. Your production reads stay on the fast path, hitting the live tables directly with no proxy in between. DataGit owns the *writes*, the *history*, and the *branches*.
 
-> **Status:** design phase. This repository contains the specification. See [DESIGN.md](DESIGN.md) for the full technical design and [PLAN.md](PLAN.md) for the build sequence.
+> **Status:** working implementation, complete through v1.3 scope on both engines. The integration suite is one suite run against PostgreSQL 16, PostgreSQL 17, and MySQL 8.4, so no feature ships working on only one of them. See [DESIGN.md](DESIGN.md) for the technical design, [PLAN.md](PLAN.md) for what is built and what is deliberately not, and [docs/measurements.md](docs/measurements.md) for measured performance.
 
 ---
 
@@ -165,19 +165,44 @@ Commits are hash-chained, so history is tamper-evident — with an honest limit,
 
 **Poor fit:** append-only event streams (use `audit` mode, or nothing), high-churn ephemeral state (sessions, queues, caches), blob-heavy tables, and workloads where a few milliseconds on the write path is unacceptable.
 
-## Roadmap
+## What is built
 
-| Release | Scope |
-|---|---|
-| **v1.0** | PostgreSQL. Both tiers, branches, sessions, cell-level merge, proposals, retention, purge, verification. |
-| **v1.1** | MySQL at full parity. |
-| **v1.2** | Schema versioning and merge with gated migration apply. |
-| **v1.3** | Crypto-shredding for GDPR erasure, external anchoring, commit signing, TypeScript and Python SDKs. |
+| Release | Scope | |
+|---|---|---|
+| **v1.0** | Both tiers, branches, sessions, cell-level merge, proposals, retention, purge, verification | done |
+| **v1.1** | MySQL at full parity | done |
+| **v1.2** | Schema versioning and merge with gated migration apply | done |
+| **v1.3** | Crypto-shredding for GDPR erasure, external anchoring, commit signing, TypeScript and Python SDKs | done |
+
+Four things are deliberately **not** built, and PLAN.md says why: OIDC (API keys
+ship; OIDC is one interface implementation away), scale evidence past Phase 0,
+deterministic encryption for searchable encrypted columns, and replica routing
+for historical reads.
+
+## Getting started
+
+```bash
+make db-up                      # PostgreSQL 16/17 and MySQL 8.4 in Docker
+make build                      # bin/datagit and bin/datagitd
+export DATAGIT_DSN="postgres://datagit:datagit@localhost:55417/datagit"
+export DATAGIT_AUTHOR="you@example.com"
+bin/datagit repo init catalog
+bin/datagit --repo catalog track products
+```
+
+The same binary talks to MySQL: the engine is detected from the DSN.
+
+```bash
+export DATAGIT_DSN="datagit:datagit@tcp(127.0.0.1:55484)/datagit"
+```
 
 ## Documentation
 
 - **[DESIGN.md](DESIGN.md)** — the full technical design: storage layout, read and write paths, the merge algorithm, schema evolution, consistency guarantees, retention and GDPR erasure, failure modes, and the alternatives that were rejected.
-- **[PLAN.md](PLAN.md)** — the build sequence: de-risking spikes, milestones, verification strategy, and the risk register.
+- **[PLAN.md](PLAN.md)** — the build sequence, what is built, and what is deliberately not.
+- **[docs/measurements.md](docs/measurements.md)** — measured performance on all three engines, and what the measurements do not cover.
+- **[docs/phase0/findings.md](docs/phase0/findings.md)** — the eleven findings that changed the design, five of them correctness bugs.
+- **[sdk/README.md](sdk/README.md)** — the Python and TypeScript SDKs, and the three things neither will let you do.
 
 ## Prior art
 

@@ -4,8 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-**Working implementation, PostgreSQL-complete.** Phase 0 finished with nothing
-unrun; M0–M7 all have working cores.
+**Complete through M7, on both engines.** Phase 0 finished with nothing unrun.
+The full integration suite runs against PostgreSQL 16, PostgreSQL 17, and MySQL
+8.4 — the same suite, not a parallel one per engine.
 
 | File | Role |
 |---|---|
@@ -26,16 +27,26 @@ carries `finding Fn` markers where they apply.
 internal/core       frozen value/mask/change types (data only, no logic)
 internal/hash       the commit hash chain, frozen as datagit.commit.v1
 internal/adapter    engine boundary + Caps; postgres/ and mysql/
+internal/db         connection boundary: $N->? rebinding, identifier quoting
+internal/pg         PostgreSQL pool (pgx)
+internal/my         MySQL pool (database/sql), with the mechanical rewrites
+internal/connect    picks the engine from a DSN, returns a MATCHED pool+adapter
 internal/catalog    control schema and sidecar naming
 internal/store      write path, resolution, diff, blame, merge, branches,
                     sessions, proposals, retention, purge
 internal/schemaeng  schema versioning, diff, merge, migration planning
-internal/crypto     crypto-shredding
+internal/crypto     crypto-shredding, anchoring, commit signing
+internal/server     gRPC handlers, API-key auth, and the in-process REST surface
+internal/obs        metrics, including resolution chain depth
 internal/model      REFERENCE implementation — test-only, never imported by
                     production code
 cmd/datagit         the CLI, which is the reference client
+cmd/datagitd        the stateless server: gRPC, optional REST, separate admin port
+sdk/python          Python SDK: generated stubs + ergonomic layer
+sdk/typescript      TypeScript SDK: the same
 test/property       the differential harness (primary correctness evidence)
-test/integration    against a real PostgreSQL
+test/integration    the SAME suite against every supported engine
+test/bench          performance gates that FAIL a budget, not just report
 test/acceptance     the README tour, run verbatim
 spikes/             throwaway Phase 0 code
 ```
@@ -74,7 +85,10 @@ These look like ordinary refactors and are not. Each is load-bearing, and most w
 14. **Crypto-shredding encrypts the sidecar only; the live table stays plaintext** (§13.3). Encrypting the live table puts DataGit back on the `main` read path.
 15. **Commit authors come from the authenticated principal, never from the client** (§15.2).
 16. **Data merges into `main` apply immediately; schema merges produce a migration plan that is applied deliberately** (§10.4). Instant schema merges would break direct readers with no rollout window.
-17. **Every feature ships on both PostgreSQL and MySQL by v1.1; v1.0 is PostgreSQL only.** Genuine engine differences belong in the §4.3 capability matrix; a performance gap is not a capability difference and is measured and published, never hidden there. PostgreSQL runs the same resumable migration state machine as MySQL despite having transactional DDL, so failure behaviour is identical and only tested once.
+17. **Every feature ships on both PostgreSQL and MySQL.** The integration suite is ONE suite run against each engine, so there is no test only one engine runs. Genuine engine differences belong in the §4.3 capability matrix; a performance gap is not a capability difference and is measured and published in `docs/measurements.md`, never hidden there. PostgreSQL runs the same resumable migration state machine as MySQL despite having transactional DDL, so failure behaviour is identical and only tested once.
+18. **Store SQL is written in ONE dialect and translated mechanically at the connection boundary** (`internal/db`). Mechanical translation is only valid for SPELLING differences — placeholders, identifier quoting. Where the engines differ SEMANTICALLY — upsert, generated-key retrieval, introspection, the write guard, column DDL — there is nothing to translate, and those go through explicit adapter methods carrying the reason they could not be shared. Never branch a query on the engine inline.
+19. **A value's kind comes from the column's DECLARED kind, not the driver's Go type** (`fromDriver`). MySQL returns `[]byte` for DECIMAL, VARCHAR, and TEXT alike, so the bytes do not say what the value is; reading a DECIMAL as opaque bytes puts the wrong tag in the canonical encoding and changes a commit hash for a value that did not change.
+20. **An unreachable database named by `DATAGIT_TEST_DSN` FAILS rather than skipping.** A silent skip reports "ok" for a suite that ran nothing, which is how an engine stays broken while CI stays green.
 
 ## Correctness strategy
 
@@ -88,24 +102,34 @@ Extend the model **before** the implementation. If the model cannot express a fe
 make db-up              # PostgreSQL 16/17 and MySQL 8.4
 make test               # unit, race detector on
 make test-property      # the differential harness
-make test-integration   # against a real PostgreSQL
+make test-integration   # the SAME suite against PG 16, PG 17, and MySQL 8.4
+make test-bench         # performance gates, all engines; fails a blown budget
 make test-acceptance    # the README tour, verbatim
 make test-frozen        # the frozen encoding and commit hash
 make lint               # vet plus the internal/model import rule
+make test-sdk-py        # Python SDK
+make test-sdk-ts        # TypeScript SDK
 make spike-s1 s3 s4 s5  # Phase 0 spikes, reproducible
 ```
 
 ## Correctness evidence so far
 
 The differential harness has run 10.2M operations with zero divergence — after
-finding five real bugs. Integration covers 54 cases against PostgreSQL 17, the
-parity gate compares both engines without a database, and the README tour runs
-verbatim.
+finding five real bugs. 80 integration tests run against each of PostgreSQL 16,
+PostgreSQL 17, and MySQL 8.4; six performance gates assert budgets on all three;
+the parity gate compares both engines without a database; and the README tour
+runs verbatim.
+
+Running the suite on both engines is itself a bug-finding tool, not a checkbox.
+It has already caught a `CAST(x AS CHAR)` that means `char(1)` on PostgreSQL and
+unbounded text on MySQL, and a widening type change that looked incompatible
+because one engine reports `numeric` where the other reports `decimal`.
 
 ## Conventions
 
 - Section references in code comments and commit messages use the `§N.N` form and point at DESIGN.md.
 - When implementation reveals that DESIGN.md is wrong, amend DESIGN.md in the same change. The design is the source of truth only if it stays true.
-- DESIGN.md §14.1 figures are **measured** on PostgreSQL. MySQL's are unmeasured until M5.3 and must not be assumed.
+- DESIGN.md §14.1 carries targets; `docs/measurements.md` carries measurements. Where they disagree, the measurement wins and §14.1 should be corrected.
+- New tests go in `test/integration` unless they need no database. Anything there runs on all three engines automatically, which is the point.
 - A performance gap is not a capability difference and must not be recorded in the §4.3 matrix.
 - DESIGN.md §20.1 lists seven open questions; PLAN.md maps each to the milestone that must close it. Do not drift past those boundaries silently.

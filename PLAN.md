@@ -25,26 +25,39 @@ Four constraints from the design shape every decision below:
 
 ## Where this stands
 
-Phase 0 is complete with nothing unrun. M0–M7 all have working cores against a
-real database. What exists:
+**Phase 0 and M0–M7 are complete.** Every milestone has working code against real
+databases, and every feature ships on both engines because there is no test that
+only one engine runs.
 
 | | |
 |---|---|
 | Differential harness | 10.2M operations, zero divergence — after finding 5 real bugs |
-| Integration tests | 54, against PostgreSQL 17 |
+| Integration tests | 80, each run against PostgreSQL 16, PostgreSQL 17, and MySQL 8.4 |
+| Unit tests | 55 |
+| Performance gates | 6, asserting budgets on all three engines |
+| SDK tests | 19, on value conversion and filter construction |
 | Acceptance | the README tour, run verbatim |
-| Parity gate | both engines compared without a database |
 | Phase 0 findings | 11, each traced to a DESIGN.md amendment |
 
-What is **not** done, stated plainly rather than left to be discovered:
+Measured figures are in [docs/measurements.md](docs/measurements.md). They are
+measurements, not targets, and where one contradicts DESIGN.md §14.1 the
+measurement wins.
 
-- **MySQL end to end** (M5). The adapter and parity gate exist, but the store's
-  SQL still assumes PostgreSQL placeholders in places, and M5.3 has not measured
-  MySQL against the S1 workloads — its performance targets remain unmeasured and
-  must not be assumed.
-- **Schema changes through the branch and proposal flow** (M6). The schema
-  engine plans and applies; it is not yet wired to merges.
-- **PII designation and the TypeScript/Python SDKs** (M7).
+### What is deliberately not built
+
+Stated plainly rather than left to be discovered:
+
+- **OIDC.** API keys ship, stored hashed. OIDC is one `Authenticator`
+  implementation away, because the handlers only ever see a principal and a
+  capability — but it is not written.
+- **Scale evidence past Phase 0.** The spikes measured at 51.4M versions; the
+  standing gates run at thousands. Nothing in the gates confirms behaviour at
+  scale, and they say so.
+- **Deterministic encryption for searchable PII.** §13.3 offers it as an
+  explicit per-column opt-in with the equality leak documented. The opt-in does
+  not exist yet; encrypted columns are not searchable.
+- **Replica routing for historical reads** (§14.3). Named as an optimization,
+  not implemented.
 
 ---
 
