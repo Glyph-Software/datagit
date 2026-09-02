@@ -4,16 +4,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-**Specification only — no code exists yet.** The repository contains four documents and nothing else:
+**Working implementation, PostgreSQL-complete.** Phase 0 finished with nothing
+unrun; M0–M7 all have working cores.
 
 | File | Role |
 |---|---|
-| [README.md](README.md) | Project overview, core concepts, worked CLI/SDK examples, stated trade-offs, roadmap. |
-| [DESIGN.md](DESIGN.md) | **Source of truth.** 20-section technical design with DDL, algorithms, and rejected alternatives. Section references (§7.3, §9.2) throughout the codebase and this file point here. |
-| [PLAN.md](PLAN.md) | Build sequence: Phase 0 de-risking spikes → M0 scaffolding → M1–M4 (v0.1→v1.0, PostgreSQL only) → M5–M7 (v1.1 MySQL, v1.2 schema, v1.3 compliance). |
-| CLAUDE.md | This file. |
+| [DESIGN.md](DESIGN.md) | **Source of truth.** 20 sections. Section references (§7.3, §9.2) throughout the code point here. |
+| [PLAN.md](PLAN.md) | Build sequence with per-milestone status of what is done and what is outstanding. |
+| [docs/phase0/findings.md](docs/phase0/findings.md) | The eleven findings that changed the design, with measurements. |
+| [README.md](README.md) | Overview, trade-offs, roadmap. |
 
-Before writing implementation code, read DESIGN.md §5–§10. Before proposing an architectural change, read §19 — it records what was already considered and rejected, with reasons.
+Before writing implementation code, read DESIGN.md §5–§10. Before proposing an
+architectural change, read §19 — it records what was already considered and
+rejected. **Before touching resolution, merge, or the sidecar, read the Phase 0
+findings**: five are correctness bugs already found and fixed, and the code
+carries `finding Fn` markers where they apply.
+
+## Layout
+
+```
+internal/core       frozen value/mask/change types (data only, no logic)
+internal/hash       the commit hash chain, frozen as datagit.commit.v1
+internal/adapter    engine boundary + Caps; postgres/ and mysql/
+internal/catalog    control schema and sidecar naming
+internal/store      write path, resolution, diff, blame, merge, branches,
+                    sessions, proposals, retention, purge
+internal/schemaeng  schema versioning, diff, merge, migration planning
+internal/crypto     crypto-shredding
+internal/model      REFERENCE implementation — test-only, never imported by
+                    production code
+cmd/datagit         the CLI, which is the reference client
+test/property       the differential harness (primary correctness evidence)
+test/integration    against a real PostgreSQL
+test/acceptance     the README tour, run verbatim
+spikes/             throwaway Phase 0 code
+```
 
 ## What DataGit is
 
@@ -31,22 +56,25 @@ Reads on `main` go straight to the live table with no DataGit hop (§7.1). A `ma
 
 ## Invariants that constrain code changes
 
-These look like ordinary refactors and are not. Each is load-bearing.
+These look like ordinary refactors and are not. Each is load-bearing, and most were learned the hard way.
 
 1. **Never add columns, triggers, or view substitutions to a tracked live table on the happy path.** It must stay a clean, schema-unmodified materialization of `main@HEAD`, because application readers query it directly. This kills the "visibility columns" model — see §19.2.
 2. **Never put DataGit on the `main` read path.** It is not a latency or availability dependency for production reads. This is the constraint the whole storage design exists to satisfy.
 3. **There is no uncommitted state on `main`** (§6.1). No sidecar row on `main` ever carries the zero commit hash or a `session_id`. Sessions exist only on other branches. Anything that stages on `main` before committing reopens the audit hole the design closed.
-4. **In resolution queries, filter `op <> 3` *outside* the union arms, and never push a user filter into the arms** (§7.3). Either mistake lets an inherited parent row resurface after the branch deleted or changed it. Filtered reads use the two-pass form: candidate keys from any segment, then full resolution of exactly those keys, then the filter. These are the two most likely correctness bugs in the system and both are harness invariants.
-5. **Canonical value encoding and `commit_id` construction are frozen** as `datagit.commit.v1` (§12.1). Changing them after any history exists invalidates every commit hash ever written. Guarded by golden tests.
-6. **Sidecar columns are named by stable column id from the very first sidecar** (§10.5). Retrofitting ids later is a sidecar rewrite. Sidecar columns are append-only; narrowing type changes fork to a new id rather than coercing history.
-7. **`internal/model` (the reference implementation) must never be imported by non-test code.** A reference model that shares code with the implementation tests nothing.
-8. **Delete/modify is always a conflict** (§9.2). Multiple merge bases are **refused with candidates named**, never silently resolved (§9.1). Rebase is not offered; it rewrites hashes.
-9. **Merges above the atomic apply limit are refused unless the caller opts into chunked apply**, which flags the ref `merge_in_progress` for the duration (§9.5). Never silently chunk.
-10. **Purged commits are marked `integrity = 'purged'`, never re-hashed** (§13.4). Hiding the gap makes the audit trail lie.
-11. **Crypto-shredding encrypts the sidecar only; the live table stays plaintext** (§13.3). Encrypting the live table puts DataGit back on the `main` read path.
-12. **Commit authors come from the authenticated principal, never from the client** (§15.2).
-13. **Data merges into `main` apply immediately; schema merges produce a migration plan that is applied deliberately** (§10.4). Instant schema merges would break direct readers with no rollout window.
-14. **Every feature ships on both PostgreSQL and MySQL by v1.1; v1.0 is PostgreSQL only.** Genuine engine differences belong in the §4.3 capability matrix; a performance gap is not a capability difference and is measured and published, never hidden there. PostgreSQL runs the same resumable migration state machine as MySQL despite having transactional DDL, so failure behaviour is identical and only tested once.
+4. **In resolution queries, filter `op <> 3` *outside* the union arms, and never push a VALUE filter into them** (§7.3). Either mistake lets an inherited parent row resurface. Filtered reads use the two-pass form. **The primary key is the one safe pushdown**, because row identity is immutable (finding F6). Measured at 51.4M versions: the wrong forms resurfaced 140,000 deleted rows and 1,400 spurious rows.
+5. **A stored chain always includes the branch itself at index 0**, followed by its inherited tail, **captured at fork** (finding F1). Never re-derive it from ancestors' live fork points: absorbing a parent would silently change what descendants resolve to.
+6. **`changed_cols` is a SUPERSET** (finding F2). A set bit does not imply a changed value. Masks narrow which columns are examined; every decision compares values. Disjoint masks mean clean; overlapping masks do **not** mean conflict.
+7. **"Changes since base" is a chain diff taken in BOTH directions** (findings F4, F5). A branch differs from the base by lacking changes as well as by adding them.
+8. **Canonical value encoding and `commit_id` construction are frozen** as `datagit.commit.v1` (§12.1). Changing them after any history exists invalidates every commit hash ever written. Guarded by golden tests.
+9. **Sidecar columns are named by stable column id from the very first sidecar** (§10.5). Retrofitting ids later is a sidecar rewrite. Sidecar columns are append-only; narrowing type changes fork to a new id rather than coercing history.
+10. **`internal/model` (the reference implementation) must never be imported by non-test code.** A reference model that shares code with the implementation tests nothing.
+11. **Delete/modify is always a conflict** (§9.2). Multiple merge bases are **refused with candidates named**, never silently resolved (§9.1). Rebase is not offered; it rewrites hashes.
+12. **Merges above the atomic apply limit are refused unless the caller opts into chunked apply**, which flags the ref `merge_in_progress` for the duration (§9.5). Never silently chunk.
+13. **Purged commits are marked `integrity = 'purged'`, never re-hashed** (§13.4). Hiding the gap makes the audit trail lie.
+14. **Crypto-shredding encrypts the sidecar only; the live table stays plaintext** (§13.3). Encrypting the live table puts DataGit back on the `main` read path.
+15. **Commit authors come from the authenticated principal, never from the client** (§15.2).
+16. **Data merges into `main` apply immediately; schema merges produce a migration plan that is applied deliberately** (§10.4). Instant schema merges would break direct readers with no rollout window.
+17. **Every feature ships on both PostgreSQL and MySQL by v1.1; v1.0 is PostgreSQL only.** Genuine engine differences belong in the §4.3 capability matrix; a performance gap is not a capability difference and is measured and published, never hidden there. PostgreSQL runs the same resumable migration state machine as MySQL despite having transactional DDL, so failure behaviour is identical and only tested once.
 
 ## Correctness strategy
 
@@ -56,18 +84,28 @@ Extend the model **before** the implementation. If the model cannot express a fe
 
 ## Commands
 
-None exist yet. PLAN.md §M0.2 and §Verification specify the intended Makefile targets — `test`, `test-integration`, `test-property`, `test-crash`, `test-acceptance`, `verify-parity`, `bench`, `lint`, `proto`. Create them in M0; do not invent alternatives.
+```bash
+make db-up              # PostgreSQL 16/17 and MySQL 8.4
+make test               # unit, race detector on
+make test-property      # the differential harness
+make test-integration   # against a real PostgreSQL
+make test-acceptance    # the README tour, verbatim
+make test-frozen        # the frozen encoding and commit hash
+make lint               # vet plus the internal/model import rule
+make spike-s1 s3 s4 s5  # Phase 0 spikes, reproducible
+```
 
-## Toolchain
+## Correctness evidence so far
 
-Present: Go 1.25.1, Docker 29.4.3, protoc 34.0.
-Missing, needed for M0: `buf` and the `psql` client. The `mysql` client is needed from M5.
-
-Target engines: PostgreSQL 16 and 17 for v1.0; MySQL 8.4 from v1.1 (§M0.2, §M5).
+The differential harness has run 10.2M operations with zero divergence — after
+finding five real bugs. Integration covers 54 cases against PostgreSQL 17, the
+parity gate compares both engines without a database, and the README tour runs
+verbatim.
 
 ## Conventions
 
 - Section references in code comments and commit messages use the `§N.N` form and point at DESIGN.md.
 - When implementation reveals that DESIGN.md is wrong, amend DESIGN.md in the same change. The design is the source of truth only if it stays true.
-- DESIGN.md §14.1 numbers are **targets**, not measurements, and are for PostgreSQL. Relabel them explicitly once Phase 0 produces real figures; MySQL targets come from measurement in M5, never by assumption.
+- DESIGN.md §14.1 figures are **measured** on PostgreSQL. MySQL's are unmeasured until M5.3 and must not be assumed.
+- A performance gap is not a capability difference and must not be recorded in the §4.3 matrix.
 - DESIGN.md §20.1 lists seven open questions; PLAN.md maps each to the milestone that must close it. Do not drift past those boundaries silently.

@@ -19,7 +19,38 @@ Four constraints from the design shape every decision below:
 
 **Approach:** de-risk first via spikes, then build milestone by milestone. Correctness is established by **differential testing against an in-memory reference model**, seeded in Phase 0 and grown through every milestone.
 
-**Toolchain present:** Go 1.25.1, Docker 29.4.3, protoc 34.0. **Missing:** `buf`, `psql`, `mysql` clients.
+**Toolchain:** Go 1.25.1, Docker 29.4.3, protoc 34.0, `buf`. PostgreSQL 16/17 and MySQL 8.4 run from `docker-compose.yml`.
+
+---
+
+## Where this stands
+
+Phase 0 is complete with nothing unrun. M0–M7 all have working cores against a
+real database. What exists:
+
+| | |
+|---|---|
+| Differential harness | 10.2M operations, zero divergence — after finding 5 real bugs |
+| Integration tests | 54, against PostgreSQL 17 |
+| Acceptance | the README tour, run verbatim |
+| Parity gate | both engines compared without a database |
+| Phase 0 findings | 11, each traced to a DESIGN.md amendment |
+
+What is **not** done, stated plainly rather than left to be discovered:
+
+- **gRPC and REST** (M1.10). The CLI talks to the store directly; the service
+  surface is unbuilt.
+- **MySQL end to end** (M5). The adapter and parity gate exist, but the store's
+  SQL still assumes PostgreSQL placeholders in places, and M5.3 has not measured
+  MySQL against the S1 workloads — its performance targets remain unmeasured and
+  must not be assumed.
+- **Chunked merge apply** (M3.5) for merges above the atomic limit.
+- **Partitioning, performance regression gates, observability, OIDC** (M4.5,
+  M4.6, M4.8, M4.9).
+- **Schema changes through the branch and proposal flow** (M6). The schema
+  engine plans and applies; it is not yet wired to merges.
+- **PII designation, external anchoring, commit signing, TypeScript and Python
+  SDKs** (M7).
 
 ---
 
