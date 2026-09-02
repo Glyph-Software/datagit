@@ -235,7 +235,11 @@ func (s *Store) writeSchemaVersion(ctx context.Context, tx adapter.Tx, t *Table,
 	}
 	dropped := map[string]int64{}
 	for id, at := range v.Dropped {
-		dropped[strconv.Itoa(int(id))] = at
+		// FormatUint, not Itoa(int(id)): core.ColID is uint32, and int is 32 bits
+		// on a 32-bit build, so routing through it could write a negative key that
+		// the ParseUint on the read side would then reject. This is the exact
+		// mirror of that parse.
+		dropped[strconv.FormatUint(uint64(id), 10)] = at
 	}
 	dj, _ := json.Marshal(dropped)
 
@@ -250,7 +254,7 @@ func (s *Store) writeSchemaVersion(ctx context.Context, tx adapter.Tx, t *Table,
 	// The mask width is recorded WITH the version, because changed_cols is over
 	// column ids and only grows; comparing masks across epochs zero-extends the
 	// shorter one (§10.5).
-	width := int(nextColID(v))
+	width := int64(nextColID(v))
 
 	return tx.Exec(ctx, s.ad.InsertOnConflict("datagit_schema_version",
 		[]string{"table_id", "branch_id", "epoch", "columns", "dropped", "digest",
