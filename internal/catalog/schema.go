@@ -71,6 +71,11 @@ CREATE TABLE IF NOT EXISTS datagit_ref (
 
     protected     boolean NOT NULL DEFAULT false,
     min_approvals smallint NOT NULL DEFAULT 0,
+
+    -- Set while a chunked merge apply is in flight (§9.5). During that window a
+    -- direct reader can observe a state that is not a commit, so the fact is
+    -- made visible on the ref rather than left to be inferred.
+    merge_in_progress boolean NOT NULL DEFAULT false,
     created_by    text NOT NULL,
     created_at    timestamptz NOT NULL DEFAULT now(),
     UNIQUE (repo_id, kind, name)

@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/Glyph-Software/datagit/internal/core"
@@ -337,5 +338,63 @@ func TestMergeCommitVerifies(t *testing.T) {
 	}
 	if err := f.store.VerifyIntegrity(f.ctx, f.repo, store.DefaultBranch); err != nil {
 		t.Errorf("hash chain does not verify after a merge: %v", err)
+	}
+}
+
+// TestLargeMergeIsRefusedUnlessChunked (§9.5). Silently chunking would relax an
+// advertised atomicity guarantee without anyone deciding to.
+func TestLargeMergeIsRefusedUnlessChunked(t *testing.T) {
+	f := setup(t)
+	f.branchWith(t, "bulk", "TENT-4P", "outdoor", "268.92")
+	f.commitOn(t, "bulk", "MUG-01", "kitchen", "14.00")
+
+	// A limit of 1 makes the two-row merge "large".
+	_, err := f.store.MergeLarge(f.ctx, f.repo, f.table, "bulk", store.DefaultBranch,
+		principal, "", false, 1, nil)
+	if err == nil {
+		t.Fatal("a merge over the atomic apply limit must be refused without opt-in")
+	}
+	var tooLarge *store.ErrMergeTooLarge
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("expected ErrMergeTooLarge, got %v", err)
+	}
+	// Nothing was applied.
+	if got := f.livePrice(t, "TENT-4P"); got != "249.00" {
+		t.Errorf("a refused merge changed the live table: %s", got)
+	}
+
+	// Opting in applies it, and flags the ref while it does.
+	var sawProgress bool
+	res, err := f.store.MergeLarge(f.ctx, f.repo, f.table, "bulk", store.DefaultBranch,
+		principal, "", true, 1, func(applied, total int) { sawProgress = true })
+	if err != nil {
+		t.Fatalf("chunked merge: %v", err)
+	}
+	if !res.Clean {
+		t.Fatalf("expected a clean merge, got %v", res.Conflicts)
+	}
+	if !sawProgress {
+		t.Error("chunked apply reported no progress; an operator has no visibility")
+	}
+	if got := f.livePrice(t, "TENT-4P"); got != "268.92" {
+		t.Errorf("the chunked merge did not reach the live table: %s", got)
+	}
+	// The in-progress flag is cleared once the branch is a valid commit again.
+	inProgress, err := f.store.MergeInProgress(f.ctx, f.repo, store.DefaultBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inProgress {
+		t.Error("merge_in_progress was left set after the merge completed")
+	}
+	if err := f.store.VerifyIntegrity(f.ctx, f.repo, store.DefaultBranch); err != nil {
+		t.Errorf("chunked apply broke the hash chain: %v", err)
+	}
+	rep, err := f.store.VerifyDrift(f.ctx, f.repo, f.table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Mismatched+rep.LiveOnly+rep.VersionOnly != 0 {
+		t.Errorf("chunked apply left the live table out of step: %+v", rep)
 	}
 }

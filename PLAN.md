@@ -44,13 +44,10 @@ What is **not** done, stated plainly rather than left to be discovered:
   SQL still assumes PostgreSQL placeholders in places, and M5.3 has not measured
   MySQL against the S1 workloads — its performance targets remain unmeasured and
   must not be assumed.
-- **Chunked merge apply** (M3.5) for merges above the atomic limit.
-- **Partitioning, performance regression gates, observability, OIDC** (M4.5,
-  M4.6, M4.8, M4.9).
+- **Partitioning, performance regression gates, OIDC** (M4.5, M4.6, M4.9).
 - **Schema changes through the branch and proposal flow** (M6). The schema
   engine plans and applies; it is not yet wired to merges.
-- **PII designation, external anchoring, commit signing, TypeScript and Python
-  SDKs** (M7).
+- **PII designation and the TypeScript/Python SDKs** (M7).
 
 ---
 
