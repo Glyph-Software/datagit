@@ -127,6 +127,48 @@ CREATE TABLE IF NOT EXISTS datagit_idempotency (
 );
 CREATE INDEX IF NOT EXISTS datagit_idempotency_gc ON datagit_idempotency (expires_at);
 
+-- Proposals and conflicts (M3, §9.4). Conflicts are ROWS, not in-memory state:
+-- a half-resolved merge must survive a service restart, a redeploy, and a
+-- reviewer going home for the weekend.
+CREATE TABLE IF NOT EXISTS datagit_proposal (
+    id           bigserial PRIMARY KEY,
+    repo_id      uuid NOT NULL REFERENCES datagit_repo(id) ON DELETE CASCADE,
+    from_ref     uuid NOT NULL REFERENCES datagit_ref(id),
+    into_ref     uuid NOT NULL REFERENCES datagit_ref(id),
+    title        text NOT NULL,
+    description  text NOT NULL DEFAULT '',
+    state        text NOT NULL CHECK (state IN ('open','conflicted','approved','merged','closed')),
+    merge_commit bytea,
+    created_by   text NOT NULL,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS datagit_conflict (
+    id           bigserial PRIMARY KEY,
+    proposal_id  bigint NOT NULL REFERENCES datagit_proposal(id) ON DELETE CASCADE,
+    table_id     bigint NOT NULL,
+    pk_bytes     bytea  NOT NULL,
+    column_id    integer,             -- NULL for whole-row conflicts
+    kind         text   NOT NULL,     -- cell | add_add | delete_modify | unique | fk | check
+    base_value   text,
+    our_value    text,
+    their_value  text,
+    resolution   text,                -- ours | theirs | custom | NULL while unresolved
+    resolved_value text,
+    resolved_by  text,
+    resolved_at  timestamptz
+);
+CREATE INDEX IF NOT EXISTS datagit_conflict_proposal ON datagit_conflict (proposal_id);
+
+CREATE TABLE IF NOT EXISTS datagit_review (
+    id          bigserial PRIMARY KEY,
+    proposal_id bigint NOT NULL REFERENCES datagit_proposal(id) ON DELETE CASCADE,
+    principal   text NOT NULL,
+    kind        text NOT NULL CHECK (kind IN ('comment','approve','request_changes')),
+    body        text NOT NULL DEFAULT '',
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS datagit_migration_journal (
     plan_id      bigint  NOT NULL,
     ordinal      integer NOT NULL,
