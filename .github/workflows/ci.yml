@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# Every job here only reads the checkout and runs tests. Granting the default
+# token read-only at the workflow level means a new job cannot silently inherit
+# write scope on the repository.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
