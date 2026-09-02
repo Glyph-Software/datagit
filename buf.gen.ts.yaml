@@ -2,9 +2,14 @@
 #
 # Separate from buf.gen.yaml so `make proto` stays fast and does not require a
 # node_modules tree. Run `make sdk-ts` to regenerate.
+#
+# The plugin is named bare rather than by path: npm workspaces hoist the binary
+# to the root node_modules/.bin, but where exactly depends on the dependency
+# tree, and a hardcoded path breaks the moment hoisting changes. `make sdk-ts`
+# puts node_modules/.bin on PATH so this resolves wherever it landed.
 version: v2
 plugins:
-  - local: sdk/typescript/node_modules/.bin/protoc-gen-es
+  - local: protoc-gen-es
     out: sdk/typescript/src/gen
     opt:
       - target=ts

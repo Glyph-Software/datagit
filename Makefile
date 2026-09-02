@@ -90,7 +90,7 @@ test-sdk-py: ## Python SDK tests (PYTHON=... for a venv)
 .PHONY: sdk-ts
 sdk-ts: ## Regenerate the TypeScript SDK stubs from the proto
 	npm install --no-audit --no-fund
-	buf generate --template buf.gen.ts.yaml
+	PATH="$(CURDIR)/node_modules/.bin:$$PATH" buf generate --template buf.gen.ts.yaml
 
 .PHONY: test-sdk-ts
 test-sdk-ts: ## TypeScript SDK tests
@@ -101,7 +101,10 @@ changeset: ## Record a version bump for the SDKs (both move together)
 	npx changeset
 
 .PHONY: sdk-version
-sdk-version: ## Apply queued changesets: bump both SDKs and write the changelog
+sdk-version: ## Apply queued changesets locally (CI normally does this)
+	@# The changelog links each entry to its pull request, which means a GitHub
+	@# API lookup and therefore a token. CI passes one automatically; locally,
+	@# export GITHUB_TOKEN (a `gh auth token` value works) before running this.
 	npm run version-packages
 
 .PHONY: check-sdk-versions

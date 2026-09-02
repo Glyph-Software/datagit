@@ -111,27 +111,10 @@ jobs:
         with:
           setup_only: true
 
-      - name: Regenerate the TypeScript stubs
-        run: |
-          npm ci
-          buf generate --template buf.gen.ts.yaml
+      - name: Install the pinned Python generator
+        run: pip install "grpcio-tools==1.83.1"
 
-      - name: Regenerate the Python stubs
-        run: |
-          pip install "grpcio-tools==1.83.1"
-          python -m grpc_tools.protoc -Iapi/proto \
-            --python_out=sdk/python --grpc_python_out=sdk/python --pyi_out=sdk/python \
-            api/proto/datagit/v1/datagit.proto
-
-      - name: The committed stubs must match
-        run: |
-          if ! git diff --exit-code -- sdk/typescript/src/gen sdk/python/datagit/v1; then
-            echo
-            echo "The committed stubs do not match api/proto/datagit/v1/datagit.proto."
-            echo "Regenerate them and commit the result:"
-            echo
-            echo "    make sdk-ts"
-            echo "    make sdk-py"
-            exit 1
-          fi
-          echo "the committed stubs match the proto"
+      # The same target contributors run, so CI and a laptop cannot disagree
+      # about what "the stubs are current" means.
+      - name: The committed stubs must match the proto
+        run: make check-sdk-stubs
